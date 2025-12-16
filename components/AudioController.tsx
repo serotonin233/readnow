@@ -320,14 +320,9 @@ const AudioController: React.FC<AudioControllerProps> = ({
              {/* iOS 增强语音教程 */}
             {ttsEngine === 'browser' && (
                 <div className="mt-2 p-3 bg-indigo-50 rounded-lg text-xs text-indigo-800 leading-relaxed border border-indigo-100">
-                   <p className="font-bold mb-1">📢 如何在 iPhone 上获得更好听的声音？</p>
-                   <p>iOS 系统内置了高质量的 AI 语音（如 <strong>LiLi</strong>, <strong>Yu-shu</strong>），但默认可能未下载。</p>
-                   <ol className="list-decimal list-inside mt-1 space-y-0.5 text-indigo-700/80">
-                      <li>打开 <strong>设置 &gt; 辅助功能 &gt; 朗读内容</strong></li>
-                      <li>点击 <strong>声音 &gt; 中文</strong></li>
-                      <li>找到 <strong>LiLi</strong> 或 <strong>Yu-shu</strong>，点击下载并选择 <strong>“增强版”</strong></li>
-                      <li>回到本网页，点击上方列表旁的 <strong>“刷新”</strong> 按钮。</li>
-                   </ol>
+                   <p className="font-bold mb-1">📢 刚刚下载了新声音但找不到？</p>
+                   <p>iOS 系统限制：新下载的语音（如 LiLi）不会立即生效。</p>
+                   <p className="mt-1 text-red-600 font-semibold">✨ 请务必手动刷新整个网页，或重启浏览器。</p>
                 </div>
             )}
           </div>
