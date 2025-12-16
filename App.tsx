@@ -100,12 +100,11 @@ const App: React.FC = () => {
 
       setBrowserVoices(sorted);
       
-      // 【关键修复】不要轻易重置用户的选择
-      if (sorted.length > 0) {
-          const currentSelectionIsGemini = selectedVoice === 'Kore' || GEMINI_VOICES_ID.includes(selectedVoice);
-          if (!selectedVoice || currentSelectionIsGemini) {
-              setSelectedVoice(sorted[0].name);
-          }
+      // 【修改】如果不处于 Gemini 模式，且当前没有选声音，则默认使用“SYSTEM_DEFAULT”
+      // 而不是强制去选 sorted[0]，这样更符合用户“使用系统设置”的预期
+      const isGeminiMode = selectedVoice === 'Kore' || GEMINI_VOICES_ID.includes(selectedVoice);
+      if (!isGeminiMode && !selectedVoice) {
+          setSelectedVoice('SYSTEM_DEFAULT');
       }
       
       return sorted.length;
@@ -158,29 +157,20 @@ const App: React.FC = () => {
     window.addEventListener('focus', handleFocus);
 
     // 5. 修复闭包陷阱的暴力轮询 (兜底)
-    // 这里的 interval 闭包里不能依赖 React State，必须直接调用 window API
     let retryCount = 0;
     const interval = setInterval(() => {
-        const voices = window.speechSynthesis.getVoices();
-        const foundEnhanced = voices.some(v => v.name.includes('LiLi') || v.name.includes('Yu-shu'));
-        
-        // 每次轮询都尝试更新 React State
         refreshBrowserVoices();
-
-        // 如果找到了增强语音，或者尝试了 20 次 (20秒)，则停止
-        // 延长到 20 秒是因为 iOS 冷启动非常慢
-        if (foundEnhanced || retryCount > 20) {
+        retryCount++;
+        // 轮询 10 秒后停止，主要为了应对 iOS 冷启动慢
+        if (retryCount > 10) {
             clearInterval(interval);
         }
-        retryCount++;
     }, 1000);
 
-    // 6. 【新增】全局交互监听 (iOS 终极必杀技)
-    // 很多时候只有用户点了一下屏幕，iOS 才会真正加载语音
+    // 6. 全局交互监听 (iOS 终极必杀技)
     const handleInteraction = () => {
         console.log("[App] User interaction detected, waking up TTS...");
         wakeUpBrowserTTS();
-        // 只需要触发一次即可
         window.removeEventListener('click', handleInteraction);
         window.removeEventListener('touchstart', handleInteraction);
     };
@@ -361,17 +351,12 @@ const App: React.FC = () => {
       if (engine === 'gemini') {
           setSelectedVoice('Kore');
       } else {
-          // 如果切换到本地语音时列表为空，尝试唤醒一次
+          // 【修改】切换到本地引擎时，默认直接选中“SYSTEM_DEFAULT”
+          // 这符合大多数希望直接使用系统设置的用户的预期
+          setSelectedVoice('SYSTEM_DEFAULT');
+          
           if (browserVoices.length === 0) {
               wakeUpBrowserTTS();
-          }
-          
-          if (browserVoices.length > 0) {
-              // 优先保留当前选择（如果有效），否则选第一个
-              const currentExists = browserVoices.find(v => v.name === selectedVoice);
-              if (!currentExists) {
-                  setSelectedVoice(browserVoices[0].name);
-              }
           }
       }
       setStatus(AppStatus.IDLE);
@@ -526,11 +511,18 @@ const App: React.FC = () => {
         const utterance = new SpeechSynthesisUtterance(currentChunks[index]);
         utterance.rate = playbackRate; 
         
-        let voiceObj = browserVoices.find(v => v.name === selectedVoice);
-        if (voiceObj) {
-            utterance.voice = voiceObj;
+        // 【修改】系统默认声音逻辑
+        // 如果选择的是“系统默认”，则不设置 voice 属性，iOS 会自动使用“系统设置”里的声音
+        if (selectedVoice === 'SYSTEM_DEFAULT') {
+             utterance.lang = 'zh-CN';
+             // 明确不设置 utterance.voice
         } else {
-            utterance.lang = 'zh-CN';
+            let voiceObj = browserVoices.find(v => v.name === selectedVoice);
+            if (voiceObj) {
+                utterance.voice = voiceObj;
+            } else {
+                utterance.lang = 'zh-CN';
+            }
         }
         
         utterance.onboundary = (event) => {
