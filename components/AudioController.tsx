@@ -132,13 +132,32 @@ const AudioController: React.FC<AudioControllerProps> = ({
     if (ttsEngine === 'gemini') {
       list = GEMINI_VOICES.map(v => ({ id: v.id, name: v.name }));
     } else {
+      // 1. 获取当前浏览器返回的列表
       if (browserVoices.length > 0) {
         list = browserVoices.map(v => ({ 
             id: v.name, 
             name: formatVoiceLabel(v)
         }));
       } else {
-        list = [{ id: '', name: '默认本地语音 (iOS/系统)' }];
+        list = [];
+      }
+      
+      // 2. 检查：如果用户当前选中的声音 (selectedVoice) 还没加载出来，
+      // 我们必须把它手动加到列表里，否则 Select 组件会视觉上跳到第一个选项，给用户“声音丢失”的错觉。
+      const isSelectedInList = list.some(v => v.id === selectedVoice);
+      const isGeminiVoice = GEMINI_VOICES.some(v => v.id === selectedVoice);
+      
+      if (!isSelectedInList && !isGeminiVoice && selectedVoice) {
+          // 尝试临时添加一个占位符
+          list.unshift({
+              id: selectedVoice,
+              name: `${selectedVoice} (加载中...)`
+          });
+      }
+
+      // 如果列表彻底为空，且也没有选中的，显示加载中
+      if (list.length === 0) {
+           list = [{ id: '', name: '正在加载本地语音... (请点击屏幕唤醒)' }];
       }
     }
 
@@ -150,7 +169,7 @@ const AudioController: React.FC<AudioControllerProps> = ({
       if (!aFav && bFav) return 1;
       return 0; // 保持原有顺序（已在 App.tsx 优化过）
     });
-  }, [ttsEngine, browserVoices, favorites]);
+  }, [ttsEngine, browserVoices, favorites, selectedVoice]);
 
 
   const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -321,8 +340,9 @@ const AudioController: React.FC<AudioControllerProps> = ({
             {ttsEngine === 'browser' && (
                 <div className="mt-2 p-3 bg-indigo-50 rounded-lg text-xs text-indigo-800 leading-relaxed border border-indigo-100">
                    <p className="font-bold mb-1">📢 刚刚下载了新声音但找不到？</p>
-                   <p>iOS 系统限制：新下载的语音（如 LiLi）不会立即生效。</p>
-                   <p className="mt-1 text-red-600 font-semibold">✨ 请务必手动刷新整个网页，或重启浏览器。</p>
+                   <p className="mb-1">1. 请前往 <span className="font-bold">设置 &gt; 辅助功能 &gt; 朗读内容 &gt; 声音</span> 下载 (推荐 LiLi 或 Yu-shu)。</p>
+                   <p className="mb-1">2. iOS 系统限制：新下载的语音不会立即生效。</p>
+                   <p className="text-red-600 font-semibold">✨ 请务必手动刷新整个网页，或重启浏览器。</p>
                 </div>
             )}
           </div>
