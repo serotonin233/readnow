@@ -1,0 +1,5 @@
+{
+  "name": "Copy of 正常版本智能文档朗读助手",
+  "description": "上传 PDF 或 Word 文档，利用 Gemini AI 将内容转换为自然流畅的中文语音朗读，支持多音色与倍速播放。",
+  "requestFramePermissions": []
+}
