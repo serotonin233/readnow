@@ -1,449 +1,810 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { AppStatus } from '../types';
+import React, { useState, useEffect, useRef } from 'react';
+import FileSelect from './components/FileSelect';
+import TextPreview from './components/TextPreview';
+import AudioController from './components/AudioController';
+import { extractTextFromDocument } from './services/documentParser';
+import { generateSpeechFromText } from './services/geminiService';
+import { decodeBase64, decodeAudioData } from './utils/audioUtils';
+import { splitTextIntoChunks } from './utils/textUtils';
+import { AppStatus } from './types';
 
-interface AudioControllerProps {
-  status: AppStatus;
-  onGenerate: () => void;
-  onPlay: () => void;
-  onPause: () => void;
-  onReset: () => void;
-  textLength: number;
-  isPlaying: boolean;
+const App: React.FC = () => {
+  // State
+  const [file, setFile] = useState<File | null>(null);
+  const [virtualFileName, setVirtualFileName] = useState<string>(''); 
+  const [extractedText, setExtractedText] = useState<string>('');
+  const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
-  // Voice & Engine Props
-  ttsEngine: 'gemini' | 'browser';
-  onEngineChange: (engine: 'gemini' | 'browser') => void;
-  selectedVoice: string;
-  onVoiceChange: (voice: string) => void;
-  onRefreshVoices: () => void; // 回调
-  browserVoices: SpeechSynthesisVoice[];
+  // OCR Settings
+  const [ocrEngine, setOcrEngine] = useState<'gemini' | 'tesseract'>('tesseract');
+
+  // TTS Settings
+  const [ttsEngine, setTtsEngine] = useState<'gemini' | 'browser'>('gemini');
+  const [selectedVoice, setSelectedVoice] = useState<string>('Kore');
+  const [playbackRate, setPlaybackRate] = useState<number>(1.0);
+  const [browserVoices, setBrowserVoices] = useState<SpeechSynthesisVoice[]>([]);
   
-  playbackRate: number;
-  onPlaybackRateChange: (rate: number) => void;
+  // Timer State
+  const [timerDuration, setTimerDuration] = useState<number>(30); // Default 30 mins
+  const [timeLeft, setTimeLeft] = useState<number | null>(null);
+
+  // Chunking State
+  const [chunks, setChunks] = useState<string[]>([]);
+  const [currentChunkIndex, setCurrentChunkIndex] = useState<number>(0);
   
-  timerDuration: number; // 分钟
-  onTimerChange: (minutes: number) => void;
-  timeLeft: number | null; // 秒
-}
-
-const GEMINI_VOICES = [
-  { id: 'Kore', name: 'Gemini - Kore (平衡)' },
-  { id: 'Zephyr', name: 'Gemini - Zephyr (温柔)' },
-  { id: 'Puck', name: 'Gemini - Puck (低沉)' },
-  { id: 'Fenrir', name: 'Gemini - Fenrir (激昂)' },
-  { id: 'Charon', name: 'Gemini - Charon (深沉)' },
-];
-
-const SPEED_OPTIONS = [0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
-
-const TIMER_OPTIONS = [
-  { value: 0, label: '不限时长' },
-  { value: 15, label: '15 分钟' },
-  { value: 30, label: '30 分钟 (推荐)' },
-  { value: 45, label: '45 分钟' },
-  { value: 60, label: '60 分钟' },
-];
-
-// 辅助函数：格式化显示名称
-const formatVoiceLabel = (v: SpeechSynthesisVoice) => {
-   // 去除系统前缀
-   let label = v.name.replace(/^(Apple|Microsoft|Google)\s+/, '');
-   
-   // 标记高质量声音
-   if (label.includes('LiLi') || label.includes('Yu-shu')) label = '✨ ' + label;
-   else if (label.includes('Sin-ji')) label = '✨ ' + label;
-   
-   // 如果名字不包含区域信息，补充一下
-   if (!label.match(/[\(（]/)) {
-       if (v.lang.toLowerCase().includes('cn')) label += ' (大陆)';
-       else if (v.lang.toLowerCase().includes('hk')) label += ' (香港)';
-       else if (v.lang.toLowerCase().includes('tw')) label += ' (台湾)';
-   }
-   return label;
-};
-
-const AudioController: React.FC<AudioControllerProps> = ({ 
-  status, 
-  onGenerate, 
-  onPlay, 
-  onPause, 
-  onReset,
-  textLength,
-  isPlaying,
-  ttsEngine,
-  onEngineChange,
-  selectedVoice,
-  onVoiceChange,
-  onRefreshVoices,
-  browserVoices,
-  playbackRate,
-  onPlaybackRateChange,
-  timerDuration,
-  onTimerChange,
-  timeLeft
-}) => {
-  const isGenerating = status === AppStatus.GENERATING_AUDIO;
-  const isBuffering = status === AppStatus.GENERATING_AUDIO;
+  // Highlighting State
+  const [chunkProgressIndex, setChunkProgressIndex] = useState<number>(-1);
   
-  // 新增：刷新按钮的状态反馈
-  const [refreshState, setRefreshState] = useState<'idle' | 'loading' | 'done'>('idle');
-  const [voiceCountMsg, setVoiceCountMsg] = useState('');
-
-  // --- Favorite Voices Logic ---
-  const [favorites, setFavorites] = useState<Set<string>>(() => {
-    try {
-      const saved = localStorage.getItem('voice_favorites');
-      return new Set(saved ? JSON.parse(saved) : []);
-    } catch (e) {
-      return new Set();
-    }
-  });
-
-  const toggleFavorite = (voiceId: string) => {
-    if (!voiceId) return;
-    const newFavs = new Set(favorites);
-    if (newFavs.has(voiceId)) {
-      newFavs.delete(voiceId);
-    } else {
-      newFavs.add(voiceId);
-    }
-    setFavorites(newFavs);
-    localStorage.setItem('voice_favorites', JSON.stringify(Array.from(newFavs)));
-  };
-
-  const isCurrentFavorite = favorites.has(selectedVoice);
+  // Audio Refs (Gemini)
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
+  const audioCacheRef = useRef<Map<number, AudioBuffer>>(new Map());
+  const fetchingSetRef = useRef<Set<number>>(new Set());
+  const startTimeRef = useRef<number>(0);
+  const pausedTimeRef = useRef<number>(0); 
   
-  const handleRefreshClick = () => {
-      setRefreshState('loading');
-      onRefreshVoices();
+  // Playback Control Refs
+  const isPlayingRef = useRef<boolean>(false);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  
+  // Gemini Progress Loop Ref
+  const animationFrameRef = useRef<number>(0);
+  
+  const sessionIdRef = useRef<number>(0);
+  // Ref for auto-scrolling the playlist
+  const activeChunkRef = useRef<HTMLDivElement>(null);
+
+  // --- Browser TTS Initialization (iOS Optimized) ---
+  
+  // 提取加载语音的逻辑为独立函数，以便手动刷新
+  // 增加返回值，告诉 UI 找到了多少个
+  const refreshBrowserVoices = (): number => {
+      const allVoices = window.speechSynthesis.getVoices();
+      console.log(`[VoiceLoader] Found ${allVoices.length} raw voices.`);
       
-      // 模拟一个加载过程以便给用户反馈
-      setTimeout(() => {
-          setRefreshState('done');
-          setVoiceCountMsg(`(${browserVoices.length})`);
-          setTimeout(() => setRefreshState('idle'), 2000);
-      }, 800);
+      // 1. 强力过滤：只保留中文语音
+      // 注意：iOS 可能会返回 "zh-CN", "zh-HK", "zh-TW"
+      const zhVoices = allVoices.filter(v => v.lang.toLowerCase().includes('zh'));
+      
+      // 2. 智能排序
+      const sorted = zhVoices.sort((a, b) => {
+         const getScore = (voice: SpeechSynthesisVoice) => {
+            const name = voice.name.toLowerCase();
+            const lang = voice.lang.toLowerCase();
+            
+            // Tier 1: iOS/Mac 顶级神仙语音
+            if (name.includes('lili')) return 100;
+            if (name.includes('yu-shu') || name.includes('yushu')) return 90;
+            if (name.includes('sin-ji') || name.includes('sinji')) return 85;
+            if (name.includes('mei-jia') || name.includes('meijia')) return 80;
+            
+            // Tier 2: 微软/谷歌
+            if (name.includes('xiaoxiao') || name.includes('yunxi')) return 70;
+            if (name.includes('google')) return 60;
+            
+            // Tier 3: 传统
+            if (name.includes('ting-ting') || name.includes('tingting')) return 50;
+            
+            if (lang === 'zh-cn') return 40;
+            return 30;
+         };
+         return getScore(b) - getScore(a);
+      });
+
+      setBrowserVoices(sorted);
+      
+      // 如果之前选中的声音现在不在列表里了，重置选择
+      if (selectedVoice && !sorted.find(v => v.name === selectedVoice) && sorted.length > 0) {
+          setSelectedVoice(sorted[0].name);
+      } else if (sorted.length > 0 && !selectedVoice) {
+          setSelectedVoice(sorted[0].name);
+      }
+      
+      return sorted.length;
   };
 
-  // Combine and Sort Voices
-  const sortedVoices = useMemo(() => {
-    let list: { id: string, name: string }[] = [];
+  // 专门用于“唤醒” iOS 语音列表的函数
+  // iOS Safari 有时必须播放点什么才能真正加载出声音列表
+  const wakeUpBrowserTTS = () => {
+      // 创建一个极短的静音发声
+      const u = new SpeechSynthesisUtterance(" ");
+      u.volume = 0; // 静音
+      u.rate = 10;  // 极速
+      u.onend = () => {
+          console.log("[VoiceLoader] Wake up sequence finished. Refreshing list...");
+          refreshBrowserVoices();
+      };
+      window.speechSynthesis.speak(u);
+      
+      // 同时直接尝试刷新一次，以防 speak 没触发
+      refreshBrowserVoices();
+  };
+
+  useEffect(() => {
+    refreshBrowserVoices();
     
-    if (ttsEngine === 'gemini') {
-      list = GEMINI_VOICES.map(v => ({ id: v.id, name: v.name }));
+    // 标准事件
+    if (window.speechSynthesis.onvoiceschanged !== undefined) {
+      window.speechSynthesis.onvoiceschanged = () => refreshBrowserVoices();
+    }
+    
+    // 针对 iOS 的暴力轮询
+    let retryCount = 0;
+    const interval = setInterval(() => {
+        const count = refreshBrowserVoices();
+        // 如果找到了 LiLi 或 Yu-shu，或者已经试了很多次
+        const foundEnhanced = browserVoices.some(v => v.name.includes('LiLi') || v.name.includes('Yu-shu'));
+        if ((foundEnhanced && count > 0) || retryCount > 5) {
+            clearInterval(interval);
+        }
+        retryCount++;
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // --- Audio Context Lifecycle ---
+  useEffect(() => {
+    return () => {
+      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close();
+      }
+      window.speechSynthesis.cancel(); 
+      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    };
+  }, []);
+
+  // --- Watchers ---
+
+  useEffect(() => {
+    if (sourceNodeRef.current) {
+      sourceNodeRef.current.playbackRate.value = playbackRate;
+    }
+  }, [playbackRate]);
+
+  useEffect(() => {
+    if (activeChunkRef.current) {
+      activeChunkRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [currentChunkIndex]);
+
+  useEffect(() => {
+    let interval: number;
+    if (isPlaying && timeLeft !== null && timeLeft > 0) {
+      interval = window.setInterval(() => {
+        setTimeLeft(prev => {
+          if (prev !== null && prev <= 1) {
+            handlePause(); 
+            return 0;
+          }
+          return prev !== null ? prev - 1 : null;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [isPlaying, timeLeft]);
+
+  // --- Logic ---
+
+  // 【关键修复】: iOS 解锁音频引擎
+  // 必须在用户点击事件中同步调用
+  const unlockAudioContext = () => {
+    console.log("[Audio] Attempting to unlock AudioContext...");
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+    }
+    
+    // 强制 Resume
+    if (audioContextRef.current.state === 'suspended') {
+       audioContextRef.current.resume().then(() => {
+           console.log("[Audio] Context resumed successfully.");
+       });
+    }
+    
+    // 播放一个极短的静音片段，彻底激活 iOS 浏览器的音频权限
+    try {
+        const buffer = audioContextRef.current.createBuffer(1, 1, 22050);
+        const source = audioContextRef.current.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioContextRef.current.destination);
+        source.start(0);
+        console.log("[Audio] Silent buffer played to unlock audio.");
+    } catch (e) {
+        console.error("[Audio] Failed to play silent buffer:", e);
+    }
+  };
+
+  const resetAudioState = () => {
+    isPlayingRef.current = false;
+    setIsPlaying(false);
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    setChunkProgressIndex(-1);
+
+    // Stop Gemini Audio
+    if (sourceNodeRef.current) {
+      try { sourceNodeRef.current.stop(); } catch (e) {}
+      sourceNodeRef.current = null;
+    }
+    
+    // Stop Browser Audio
+    window.speechSynthesis.cancel();
+    
+    audioCacheRef.current.clear();
+    fetchingSetRef.current.clear();
+    sessionIdRef.current += 1; 
+    
+    setCurrentChunkIndex(0);
+    pausedTimeRef.current = 0;
+    
+    if (timerDuration > 0) {
+        setTimeLeft(timerDuration * 60);
     } else {
-      if (browserVoices.length > 0) {
-        list = browserVoices.map(v => ({ 
-            id: v.name, 
-            name: formatVoiceLabel(v)
-        }));
+        setTimeLeft(null);
+    }
+  };
+
+  const handleFileSelected = async (selectedFile: File) => {
+    setFile(selectedFile);
+    setVirtualFileName(selectedFile.name);
+    setStatus(AppStatus.PARSING_PDF);
+    setErrorMsg(null);
+    resetAudioState();
+    setExtractedText('');
+    setChunks([]); 
+
+    let estimatedChars = 0;
+    if (timerDuration > 0) {
+        estimatedChars = timerDuration * 500;
+    } else {
+        estimatedChars = 50000;
+    }
+    
+    console.log(`Setting parsing limit to ${estimatedChars} chars. OCR Engine: ${ocrEngine}`);
+
+    try {
+      const text = await extractTextFromDocument(selectedFile, (newChunk) => {
+         setExtractedText(prev => prev + newChunk);
+      }, estimatedChars, ocrEngine); 
+      
+      if (!text || text.trim().length === 0) {
+         setExtractedText(""); 
+         throw new Error("未能从文档中提取到有效文字。请确认文档包含可读文字。");
       } else {
-        list = [{ id: '', name: '默认本地语音 (iOS/系统)' }];
+         setExtractedText(text);
+      }
+      
+      setStatus(AppStatus.IDLE);
+    } catch (err: any) {
+      console.error(err);
+      setErrorMsg(err.message || "文档解析失败");
+      setStatus(AppStatus.ERROR);
+      setFile(null);
+    }
+  };
+
+  const handleTextSubmit = (text: string) => {
+      resetAudioState();
+      setFile(null); // Clear file
+      setVirtualFileName('手动输入文本.txt');
+      setExtractedText(text);
+      setStatus(AppStatus.IDLE);
+      setErrorMsg(null);
+  };
+
+  const handleEngineChange = (engine: 'gemini' | 'browser') => {
+      resetAudioState();
+      setTtsEngine(engine);
+      if (engine === 'gemini') {
+          setSelectedVoice('Kore');
+      } else {
+          // 切换到本地语音时，自动选中排名第一的语音（我们已经在 useEffect 里把 LiLi/Yu-shu 排到第一了）
+          if (browserVoices.length > 0) {
+              setSelectedVoice(browserVoices[0].name);
+          } else {
+              // 尝试唤醒
+              wakeUpBrowserTTS();
+          }
+      }
+      setStatus(AppStatus.IDLE);
+  };
+
+  const handleVoiceChange = (voice: string) => {
+    setSelectedVoice(voice);
+    if (status === AppStatus.READY_TO_PLAY || status === AppStatus.PLAYING) {
+      resetAudioState();
+      setStatus(AppStatus.IDLE);
+    }
+  };
+
+  // --- Gemini Specific Preload ---
+  const preloadGeminiChunk = async (index: number, currentSessionId: number) => {
+    if (timeLeft === 0 && timerDuration > 0) return;
+    if (index >= chunks.length || index < 0) return;
+    if (audioCacheRef.current.has(index)) return;
+    if (fetchingSetRef.current.has(index)) return;
+
+    fetchingSetRef.current.add(index);
+
+    try {
+      const text = chunks[index];
+      const base64Audio = await generateSpeechFromText(text, selectedVoice);
+      
+      if (currentSessionId !== sessionIdRef.current) return;
+
+      if (!audioContextRef.current) {
+        // Fallback creation (should be handled by unlockAudioContext)
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      }
+
+      const audioBytes = decodeBase64(base64Audio);
+      const audioBuffer = await decodeAudioData(audioBytes, audioContextRef.current, 24000);
+
+      audioCacheRef.current.set(index, audioBuffer);
+    } catch (error) {
+      console.error(`Error loading chunk ${index}`, error);
+    } finally {
+      fetchingSetRef.current.delete(index);
+    }
+  };
+
+  const handleJumpToChunk = async (index: number) => {
+    if (status === AppStatus.PARSING_PDF) return;
+    
+    // 只要用户点击，尝试解锁音频
+    if (ttsEngine === 'gemini') unlockAudioContext();
+    
+    isPlayingRef.current = false;
+    setIsPlaying(false);
+    
+    // Stop Logic for Jump
+    if (audioContextRef.current && audioContextRef.current.state === 'running') {
+        audioContextRef.current.suspend();
+    }
+    if (sourceNodeRef.current) { try { sourceNodeRef.current.stop(); } catch(e) {} sourceNodeRef.current = null; }
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    window.speechSynthesis.cancel();
+    
+    sessionIdRef.current += 1;
+    
+    let currentChunks = chunks;
+    if (chunks.length === 0 && extractedText.trim().length > 0) {
+       // Fallback logic, should reuse existing logic from startProcess
+       const chunkSize = ttsEngine === 'gemini' ? 200 : 2500;
+       currentChunks = splitTextIntoChunks(extractedText, chunkSize);
+       setChunks(currentChunks);
+    }
+    
+    if (currentChunks.length === 0) return;
+    
+    pausedTimeRef.current = 0;
+    setChunkProgressIndex(-1);
+    
+    if (timeLeft === 0 && timerDuration > 0) {
+        setTimeLeft(timerDuration * 60);
+    }
+
+    setStatus(AppStatus.READY_TO_PLAY); 
+    playSequence(index, currentChunks);
+  };
+
+  const handleStartProcess = async () => {
+    if (!extractedText) return;
+    
+    // 【关键】：在用户点击“开始朗读”的一瞬间，立刻解锁 AudioContext
+    // 这能解决 iPhone 上 Gemini 缓冲后不播放的问题
+    if (ttsEngine === 'gemini') {
+        unlockAudioContext();
+    }
+    
+    resetAudioState();
+    
+    if (timerDuration > 0) {
+      setTimeLeft(timerDuration * 60);
+    } else {
+      setTimeLeft(null);
+    }
+    
+    const chunkSize = ttsEngine === 'gemini' ? 200 : 2500;
+    const newChunks = splitTextIntoChunks(extractedText, chunkSize);
+    setChunks(newChunks);
+
+    if (newChunks.length === 0) return;
+
+    // Start
+    if (ttsEngine === 'gemini') {
+        setStatus(AppStatus.GENERATING_AUDIO); 
+        const currentSessionId = sessionIdRef.current;
+        await preloadGeminiChunk(0, currentSessionId);
+        
+        if (currentSessionId !== sessionIdRef.current) return;
+
+        if (audioCacheRef.current.has(0)) {
+            setStatus(AppStatus.READY_TO_PLAY);
+            playSequence(0, newChunks); 
+        } else {
+            setErrorMsg("生成失败，请检查网络或切换到“本地语音”模式。");
+            setStatus(AppStatus.IDLE);
+        }
+    } else {
+        setStatus(AppStatus.READY_TO_PLAY);
+        playSequence(0, newChunks);
+    }
+  };
+
+  const playSequence = async (index: number, currentChunks: string[] = chunks) => {
+    const currentSessionId = sessionIdRef.current;
+    
+    if (timerDuration > 0 && timeLeft !== null && timeLeft <= 0) {
+        setIsPlaying(false);
+        isPlayingRef.current = false;
+        setStatus(AppStatus.READY_TO_PLAY); 
+        return;
+    }
+
+    if (index >= currentChunks.length) {
+      setIsPlaying(false);
+      isPlayingRef.current = false;
+      setStatus(AppStatus.IDLE);
+      setCurrentChunkIndex(0);
+      pausedTimeRef.current = 0;
+      setChunkProgressIndex(-1);
+      return;
+    }
+
+    setCurrentChunkIndex(index);
+    setIsPlaying(true);
+    isPlayingRef.current = true;
+    setStatus(AppStatus.PLAYING);
+    setChunkProgressIndex(0); // 重置高亮
+
+    // === PATH A: BROWSER NATIVE TTS ===
+    if (ttsEngine === 'browser') {
+        const utterance = new SpeechSynthesisUtterance(currentChunks[index]);
+        utterance.rate = playbackRate; 
+        
+        let voiceObj = browserVoices.find(v => v.name === selectedVoice);
+        
+        if (voiceObj) {
+            utterance.voice = voiceObj;
+        } else {
+            utterance.lang = 'zh-CN';
+        }
+        
+        // --- 核心：使用 onboundary 实现逐词高亮 ---
+        utterance.onboundary = (event) => {
+            if (event.name === 'word' || event.name === 'sentence') {
+                // 更新当前字符索引，TextPreview 组件会据此渲染高亮
+                setChunkProgressIndex(event.charIndex);
+            }
+        };
+
+        utterance.onend = () => {
+            if (isPlayingRef.current && sessionIdRef.current === currentSessionId) {
+                setChunkProgressIndex(-1); // 结束本段
+                playSequence(index + 1, currentChunks);
+            }
+        };
+
+        utterance.onerror = (e) => {
+            if (e.error === 'interrupted' || e.error === 'canceled') {
+                return;
+            }
+            console.error("Browser TTS Error:", e.error, e);
+            setIsPlaying(false);
+            isPlayingRef.current = false;
+        };
+
+        window.speechSynthesis.speak(utterance);
+        return;
+    }
+
+    // === PATH B: GEMINI AI TTS ===
+    if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+    }
+    
+    // 再次确保 Resume (解决 Gemini 自动结束问题)
+    if (audioContextRef.current.state === 'suspended') {
+      try {
+        console.log("Resuming AudioContext before playback...");
+        await audioContextRef.current.resume();
+      } catch (e) {
+        console.error("Audio Context Resume Failed", e);
       }
     }
 
-    return list.sort((a, b) => {
-      const aFav = favorites.has(a.id);
-      const bFav = favorites.has(b.id);
-      // Favorites first
-      if (aFav && !bFav) return -1;
-      if (!aFav && bFav) return 1;
-      return 0; // 保持原有顺序（已在 App.tsx 优化过）
-    });
-  }, [ttsEngine, browserVoices, favorites]);
+    let buffer = audioCacheRef.current.get(index);
+
+    if (!buffer) {
+      setStatus(AppStatus.GENERATING_AUDIO);
+      await preloadGeminiChunk(index, currentSessionId);
+      
+      if (sessionIdRef.current !== currentSessionId) {
+          console.log("Session changed during buffering.");
+          return;
+      }
+
+      buffer = audioCacheRef.current.get(index);
+      if (!buffer) {
+        if (sessionIdRef.current === currentSessionId) {
+            setIsPlaying(false);
+            isPlayingRef.current = false;
+            setStatus(AppStatus.ERROR);
+            setErrorMsg("缓冲超时，建议切换“本地语音”");
+        }
+        return;
+      }
+      setStatus(AppStatus.PLAYING);
+    }
+
+    preloadGeminiChunk(index + 1, currentSessionId);
+    setTimeout(() => {
+        if (isPlayingRef.current && sessionIdRef.current === currentSessionId) {
+            preloadGeminiChunk(index + 2, currentSessionId);
+        }
+    }, 5000);
+
+    const source = audioContextRef.current.createBufferSource();
+    source.buffer = buffer;
+    source.playbackRate.value = playbackRate;
+    source.connect(audioContextRef.current.destination);
+
+    const offset = pausedTimeRef.current;
+    source.start(0, offset);
+    startTimeRef.current = audioContextRef.current.currentTime;
+    sourceNodeRef.current = source;
+
+    // --- 核心：Gemini 模式下的估算高亮逻辑 ---
+    // 由于后端不返回时间戳，我们根据音频时长和播放进度进行线性估算
+    // 效果类似于卡拉OK，虽然不是绝对精准，但视觉体验很好
+    const bufferDuration = buffer.duration;
+    const chunkTextLength = currentChunks[index].length;
+    
+    const animateProgress = () => {
+        if (!isPlayingRef.current || sessionIdRef.current !== currentSessionId || !sourceNodeRef.current || !audioContextRef.current) {
+            return;
+        }
+
+        const currentTime = audioContextRef.current.currentTime;
+        // 计算当前音频播放了多少秒（考虑变速）
+        // 注意：currentTime 是全局时间，startTimeRef 是开始播放时的全局时间
+        const elapsedRealTime = currentTime - startTimeRef.current;
+        const elapsedAudioTime = elapsedRealTime * playbackRate + offset; // 加上之前的偏移
+
+        if (elapsedAudioTime >= bufferDuration) {
+            setChunkProgressIndex(chunkTextLength);
+        } else {
+            // 进度比例
+            const ratio = elapsedAudioTime / bufferDuration;
+            // 估算当前字符位置
+            const estimatedIndex = Math.floor(ratio * chunkTextLength);
+            setChunkProgressIndex(estimatedIndex);
+            
+            animationFrameRef.current = requestAnimationFrame(animateProgress);
+        }
+    };
+    
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    animationFrameRef.current = requestAnimationFrame(animateProgress);
 
 
-  const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    onVoiceChange(e.target.value);
+    source.onended = () => {
+      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+      // 必须再次检查 isPlayingRef，因为 stop() 也会触发 onended
+      if (isPlayingRef.current && sessionIdRef.current === currentSessionId) {
+        pausedTimeRef.current = 0;
+        setChunkProgressIndex(-1);
+        playSequence(index + 1, currentChunks);
+      }
+    };
   };
 
-  const defaultIndex = 4; 
-  const currentIndex = SPEED_OPTIONS.findIndex(r => r === playbackRate) !== -1 
-    ? SPEED_OPTIONS.findIndex(r => r === playbackRate) 
-    : defaultIndex;
+  const handlePause = () => {
+    isPlayingRef.current = false; 
+    setIsPlaying(false);
+    setStatus(AppStatus.READY_TO_PLAY);
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
 
-  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const index = parseInt(e.target.value, 10);
-    onPlaybackRateChange(SPEED_OPTIONS[index]);
+    if (ttsEngine === 'browser') {
+        window.speechSynthesis.cancel(); 
+    } else {
+        // 关键修复：iOS Safari 上 AudioContext 需要 suspend 才能立即停止声音
+        if (audioContextRef.current && audioContextRef.current.state === 'running') {
+            audioContextRef.current.suspend();
+        }
+
+        if (sourceNodeRef.current) {
+            try {
+               sourceNodeRef.current.stop();
+            } catch(e) {}
+            
+            // 记录暂停位置
+            if (audioContextRef.current) {
+                const elapsed = (audioContextRef.current.currentTime - startTimeRef.current) * playbackRate;
+                pausedTimeRef.current = pausedTimeRef.current + elapsed;
+            }
+        }
+    }
   };
 
-  const formatTimeLeft = (seconds: number) => {
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  const handleResume = () => {
+     if (timerDuration > 0 && timeLeft !== null && timeLeft <= 0) {
+         if (window.confirm("定时已结束，是否重置时间继续播放？")) {
+             setTimeLeft(timerDuration * 60);
+         } else {
+             return;
+         }
+     }
+     
+     // Resume 时也需要解锁，防止长时间暂停后 Context 被浏览器冻结
+     if (ttsEngine === 'gemini') unlockAudioContext();
+     
+     playSequence(currentChunkIndex);
+  };
+
+  const handleReset = () => {
+    resetAudioState();
+    setFile(null);
+    setVirtualFileName('');
+    setExtractedText('');
+    setChunks([]);
+    setStatus(AppStatus.IDLE);
+    setErrorMsg(null);
+    if (timerDuration > 0) {
+       setTimeLeft(timerDuration * 60);
+    }
+  };
+
+  const handleTimerChange = (minutes: number) => {
+    setTimerDuration(minutes);
+    if (minutes > 0) {
+        setTimeLeft(minutes * 60);
+    } else {
+        setTimeLeft(null);
+    }
   };
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-      <div className="flex flex-col space-y-6">
+    <div className="flex flex-col min-h-screen bg-slate-50">
+      {/* Header */}
+      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between shadow-sm z-20 sticky top-0">
+        <div className="flex items-center gap-3">
+          <div className="bg-indigo-600 p-2 rounded-lg text-white">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
+            </svg>
+          </div>
+          <h1 className="text-xl font-bold text-slate-800">智能文档朗读助手</h1>
+        </div>
+        <div className="text-sm text-slate-500 hidden sm:block">
+           快速流式朗读 · Gemini & Native TTS
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="flex-1 container mx-auto p-4 md:p-6 lg:p-8 max-w-7xl flex flex-col md:flex-row gap-6 h-auto items-start">
         
-        {/* Header / Status */}
-        <div className="text-center pb-2 border-b border-slate-100 min-h-[40px] flex items-center justify-center">
-           {isBuffering && ttsEngine === 'gemini' ? (
-             <div className="flex items-center justify-center space-x-2 text-indigo-600">
-                <span className="relative flex h-3 w-3">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-3 w-3 bg-indigo-500"></span>
-                </span>
-                <span className="font-medium text-sm">
-                  {isPlaying ? '正在缓冲下一段...' : '正在生成语音...'}
-                </span>
-             </div>
-           ) : isPlaying ? (
-              <div className="flex flex-col items-center justify-center text-emerald-600">
-                <div className="flex items-center space-x-2">
-                   <span className="relative flex h-3 w-3">
-                    <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-                  </span>
-                  <span className="font-medium text-sm">正在朗读 ({ttsEngine === 'gemini' ? 'Gemini' : '本地语音'})</span>
-                </div>
-                {timeLeft !== null && (
-                  <span className="text-xs font-mono mt-1 text-emerald-500">
-                    剩余时间: {formatTimeLeft(timeLeft)}
-                  </span>
-                )}
-              </div>
-           ) : status === AppStatus.READY_TO_PLAY ? (
-               <div className="flex items-center justify-center space-x-2 text-slate-600">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                  <path d="M5.75 3a.75.75 0 0 0-.75.75v12.5c0 .414.336.75.75.75h1.5a.75.75 0 0 0 .75-.75V3.75A.75.75 0 0 0 7.25 3h-1.5ZM12.75 3a.75.75 0 0 0-.75.75v12.5c0 .414.336.75.75.75h1.5a.75.75 0 0 0 .75-.75V3.75a.75.75 0 0 0-.75-.75h-1.5Z" />
-                </svg>
-                <span className="font-medium text-sm">已暂停</span>
-              </div>
-           ) : (
-             <span className="text-slate-500 text-sm font-medium">
-                {textLength > 0 ? `已准备 (${textLength} 字)` : '等待文档...'}
-             </span>
-           )}
-        </div>
-
-        {/* Controls Grid */}
-        <div className="grid grid-cols-1 gap-4">
-          
-          {/* 1. 引擎选择 */}
-          <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
-             <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider block mb-2">朗读引擎</label>
-             <div className="flex gap-2">
-                <button 
-                  onClick={() => onEngineChange('gemini')}
-                  disabled={isPlaying}
-                  className={`flex-1 py-2 px-2 rounded text-xs font-medium transition-colors border
-                    ${ttsEngine === 'gemini' 
-                      ? 'bg-white border-indigo-500 text-indigo-700 shadow-sm' 
-                      : 'bg-slate-100 border-transparent text-slate-500 hover:bg-slate-200'}`}
-                >
-                  Gemini AI<br/>(高音质·有限额)
-                </button>
-                <button 
-                  onClick={() => onEngineChange('browser')}
-                  disabled={isPlaying}
-                  className={`flex-1 py-2 px-2 rounded text-xs font-medium transition-colors border
-                    ${ttsEngine === 'browser' 
-                      ? 'bg-white border-emerald-500 text-emerald-700 shadow-sm' 
-                      : 'bg-slate-100 border-transparent text-slate-500 hover:bg-slate-200'}`}
-                >
-                  本地语音<br/>(免费·无限量)
-                </button>
-             </div>
-          </div>
-
-          {/* 2. 声音选择 */}
-          <div className="space-y-1">
-            <div className="flex justify-between items-center">
-                <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">选择声音</label>
-                <div className="flex gap-1 items-center">
-                    <span className="text-[10px] text-slate-400">
-                        {isCurrentFavorite ? '★ 已收藏' : ''}
-                    </span>
-                    {ttsEngine === 'browser' && (
-                        <button 
-                            onClick={handleRefreshClick}
-                            disabled={refreshState === 'loading'}
-                            className={`text-xs flex items-center gap-0.5 px-2 py-0.5 rounded transition-colors
-                                ${refreshState === 'done' ? 'text-emerald-600 bg-emerald-50' : 'text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50'}
-                            `}
-                            title="刷新语音列表"
-                        >
-                            {refreshState === 'loading' ? (
-                                <span className="animate-spin h-3 w-3 border-b-2 border-indigo-600 rounded-full inline-block"></span>
-                            ) : refreshState === 'done' ? (
-                                <span>OK {voiceCountMsg}</span>
-                            ) : (
-                                <>
-                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3">
-                                        <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
-                                    </svg>
-                                    <span>刷新</span>
-                                </>
-                            )}
-                        </button>
-                    )}
-                </div>
-            </div>
-            
-            <div className="flex gap-2">
-                <select 
-                  value={selectedVoice} 
-                  onChange={handleVoiceChange}
-                  className="flex-1 min-w-0 p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                >
-                  {sortedVoices.map(v => (
-                    <option key={v.id} value={v.id}>
-                      {favorites.has(v.id) ? '★ ' : ''}{v.name}
-                    </option>
-                  ))}
-                </select>
-                
-                <button
-                    onClick={() => toggleFavorite(selectedVoice)}
-                    disabled={!selectedVoice}
-                    className={`p-2.5 rounded-lg border transition-all flex-shrink-0
-                        ${isCurrentFavorite 
-                            ? 'bg-amber-50 border-amber-200 text-amber-500 hover:bg-amber-100' 
-                            : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:text-slate-600'
-                        }`}
-                    title={isCurrentFavorite ? "取消收藏" : "收藏此声音"}
-                >
-                    {isCurrentFavorite ? (
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
-                          <path fillRule="evenodd" d="M10.788 3.21c.448-1.077 1.976-1.077 2.424 0l2.082 5.007 5.404.433c1.164.093 1.636 1.545.749 2.305l-4.117 3.527 1.257 5.273c.271 1.136-.964 2.033-1.96 1.425L12 18.354 7.373 21.18c-.996.608-2.231-.29-1.96-1.425l1.257-5.273-4.117-3.527c-.887-.76-.415-2.212.749-2.305l5.404-.433 2.082-5.006Z" clipRule="evenodd" />
-                        </svg>
-                    ) : (
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M11.48 3.499a.562.562 0 0 1 1.04 0l2.125 5.111a.563.563 0 0 0 .475.345l5.518.442c.563.045.797.777.362 1.13l-4.203 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.563.563 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.203-3.602a.563.563 0 0 1 .362-1.13l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z" />
-                        </svg>
-                    )}
-                </button>
-            </div>
-
-             {/* iOS 增强语音教程 */}
-            {ttsEngine === 'browser' && (
-                <div className="mt-2 p-3 bg-indigo-50 rounded-lg text-xs text-indigo-800 leading-relaxed border border-indigo-100">
-                   <p className="font-bold mb-1">📢 如何在 iPhone 上获得更好听的声音？</p>
-                   <p>iOS 系统内置了高质量的 AI 语音（如 <strong>LiLi</strong>, <strong>Yu-shu</strong>），但默认可能未下载。</p>
-                   <ol className="list-decimal list-inside mt-1 space-y-0.5 text-indigo-700/80">
-                      <li>打开 <strong>设置 &gt; 辅助功能 &gt; 朗读内容</strong></li>
-                      <li>点击 <strong>声音 &gt; 中文</strong></li>
-                      <li>找到 <strong>LiLi</strong> 或 <strong>Yu-shu</strong>，点击下载并选择 <strong>“增强版”</strong></li>
-                      <li>回到本网页，点击上方列表旁的 <strong>“刷新”</strong> 按钮。</li>
-                   </ol>
-                </div>
-            )}
-          </div>
-          
-           {/* 3. 定时设定 */}
-          <div className="space-y-1">
-             <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1">
-               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-3 h-3">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-                </svg>
-               定时关闭
-             </label>
-             <select
-               value={timerDuration}
-               onChange={(e) => onTimerChange(parseInt(e.target.value))}
-               disabled={isPlaying || status === AppStatus.PARSING_PDF}
-               className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none transition-all disabled:opacity-60"
-             >
-                {TIMER_OPTIONS.map(opt => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-             </select>
-          </div>
-
-          {/* 4. 速度 */}
-          <div className="space-y-1 pt-1">
-             <div className="flex justify-between items-center mb-1">
-                <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">播放速度</label>
-                <span className="text-xs font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded transition-all">{playbackRate}x</span>
-             </div>
-             <div className="relative w-full h-8 flex items-center">
-               <input 
-                 type="range" 
-                 min="0" 
-                 max={SPEED_OPTIONS.length - 1}
-                 step="1"
-                 value={currentIndex}
-                 onChange={handleSliderChange}
-                 className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer z-10 focus:outline-none focus:ring-2 focus:ring-indigo-200 rounded-full"
+        {/* Left Panel: Input & Text */}
+        <div className="flex-1 w-full min-w-0 flex flex-col gap-4 h-auto">
+          {(!file && !extractedText) ? (
+            <div className="flex-1 flex flex-col justify-center min-h-[500px]">
+               <FileSelect 
+                 onFileSelected={handleFileSelected} 
+                 onTextSubmit={handleTextSubmit}
+                 isLoading={status === AppStatus.PARSING_PDF} 
+                 ocrEngine={ocrEngine}
+                 onOcrEngineChange={setOcrEngine}
                />
-               <div className="absolute w-full flex justify-between px-1 pointer-events-none">
-                 {SPEED_OPTIONS.map((opt, idx) => (
-                    <div 
-                      key={opt} 
-                      className={`w-1 h-1 rounded-full ${opt === 1.0 ? 'bg-indigo-400 scale-150' : 'bg-slate-300'} ${idx === 0 ? 'ml-0.5' : ''} ${idx === SPEED_OPTIONS.length -1 ? 'mr-0.5' : ''}`}
-                    ></div>
-                 ))}
-               </div>
-             </div>
-          </div>
-        </div>
-
-        {/* Action Buttons */}
-        <div className="pt-2">
-          {status === AppStatus.IDLE ? (
-            <button
-              onClick={onGenerate}
-              disabled={textLength === 0}
-              className={`w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-semibold text-white transition-all shadow-sm active:scale-95
-                ${textLength > 0 
-                  ? 'bg-indigo-600 hover:bg-indigo-700 hover:shadow-md' 
-                  : 'bg-slate-300 cursor-not-allowed'}`}
-            >
-              开始朗读
-              {textLength > 0 && (
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                  <path d="M6.3 2.841A1.5 1.5 0 0 0 4 4.11V15.89a1.5 1.5 0 0 0 2.3 1.269l9.344-5.89a1.5 1.5 0 0 0 0-2.538L6.3 2.84Z" />
-                </svg>
-              )}
-            </button>
+               {errorMsg && (
+                 <div className="mt-4 p-4 bg-red-50 text-red-600 rounded-lg border border-red-200 text-sm text-center animate-pulse">
+                   {errorMsg}
+                 </div>
+               )}
+            </div>
           ) : (
-            <div className="flex gap-3">
-              <button
-                onClick={isPlaying ? onPause : onPlay}
-                disabled={isBuffering && !isPlaying && ttsEngine === 'gemini'} 
-                className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-semibold text-white transition-all shadow-md active:scale-95
-                  ${isPlaying 
-                    ? 'bg-amber-500 hover:bg-amber-600' 
-                    : (isBuffering && ttsEngine === 'gemini')
-                      ? 'bg-slate-400 cursor-wait'
-                      : 'bg-emerald-600 hover:bg-emerald-700'}`}
-              >
-                {isPlaying ? (
-                   <>
-                     <span>暂停</span>
-                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
-                       <path fillRule="evenodd" d="M6.75 5.25a.75.75 0 0 1 .75-.75H9a.75.75 0 0 1 .75.75v13.5a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V5.25Zm7.5 0A.75.75 0 0 1 15 4.5h1.5a.75.75 0 0 1 .75.75v13.5a.75.75 0 0 1-.75.75H15a.75.75 0 0 1-.75-.75V5.25Z" clipRule="evenodd" />
-                     </svg>
-                   </>
-                ) : (
-                  <>
-                    <span>{(isBuffering && ttsEngine === 'gemini') ? '缓冲中...' : '继续播放'}</span>
-                    {!(isBuffering && ttsEngine === 'gemini') && (
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
-                        <path fillRule="evenodd" d="M4.5 5.653c0-1.426 1.529-2.33 2.779-1.643l11.54 6.348c1.295.712 1.295 2.573 0 3.285L7.28 19.991c-1.25.687-2.779-.217-2.779-1.643V5.653Z" clipRule="evenodd" />
-                      </svg>
-                    )}
-                  </>
-                )}
-              </button>
-              
-              <button 
-                onClick={onReset}
-                className="px-4 py-3 text-slate-500 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors active:scale-95"
-                title="重新开始"
-              >
-                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
-                </svg>
-              </button>
+            <div className="w-full">
+               <TextPreview 
+                  text={extractedText} 
+                  onChange={setExtractedText} 
+                  fileName={file ? file.name : virtualFileName}
+                  isProcessing={status === AppStatus.PARSING_PDF}
+                  chunks={chunks}
+                  currentChunkIndex={currentChunkIndex}
+                  chunkProgressIndex={chunkProgressIndex}
+                  isPlaying={isPlaying || status === AppStatus.PLAYING || status === AppStatus.READY_TO_PLAY}
+               />
             </div>
           )}
         </div>
-      </div>
+
+        {/* Right Panel: Controls & Visualization */}
+        <div className="w-full md:w-80 lg:w-96 flex-shrink-0 flex flex-col gap-4 sticky top-24 self-start">
+           
+           <AudioController 
+             status={status}
+             onGenerate={handleStartProcess}
+             onPlay={handleResume}
+             onPause={handlePause}
+             onReset={handleReset}
+             textLength={extractedText.length}
+             isPlaying={isPlaying}
+             
+             ttsEngine={ttsEngine}
+             onEngineChange={handleEngineChange}
+             selectedVoice={selectedVoice}
+             onVoiceChange={handleVoiceChange}
+             onRefreshVoices={wakeUpBrowserTTS} 
+             browserVoices={browserVoices}
+             
+             playbackRate={playbackRate}
+             onPlaybackRateChange={setPlaybackRate}
+             timerDuration={timerDuration}
+             onTimerChange={handleTimerChange}
+             timeLeft={timeLeft}
+           />
+
+           {/* Playlist */}
+           <div className="bg-white rounded-xl border border-slate-200 text-sm text-slate-600 flex-1 flex flex-col shadow-sm max-h-[500px] overflow-hidden">
+             <div className="p-4 border-b border-slate-100 bg-slate-50/50">
+                <h3 className="font-bold text-slate-800 flex justify-between items-center">
+                  <span>
+                    {chunks.length > 0 ? '播放列表' : '状态监控'}
+                  </span>
+                  {chunks.length > 0 && (
+                     <span className="text-xs font-normal text-slate-500 bg-slate-200 px-2 py-0.5 rounded-full">
+                       {currentChunkIndex + 1} / {chunks.length}
+                     </span>
+                  )}
+                </h3>
+             </div>
+             
+             <div className="flex-1 overflow-y-auto p-2 space-y-2 h-[300px]">
+                {chunks.length === 0 ? (
+                  <div className="p-4 text-center text-slate-400 text-xs leading-relaxed">
+                     {status === AppStatus.PARSING_PDF ? (
+                       <div className="flex flex-col items-center gap-2">
+                         <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-indigo-400"></div>
+                         <span>正在逐页解析文档...<br/>文字将实时显示</span>
+                       </div>
+                     ) : (
+                        <>
+                          <p className="mb-2">暂无分段数据。</p>
+                          <p>点击“开始朗读”后，系统会将文章智能切分为短句并显示在此处。</p>
+                        </>
+                     )}
+                  </div>
+                ) : (
+                  chunks.map((chunk, idx) => {
+                    const isActive = idx === currentChunkIndex;
+                    return (
+                      <div 
+                        key={idx}
+                        ref={isActive ? activeChunkRef : null}
+                        onClick={() => handleJumpToChunk(idx)}
+                        className={`p-3 rounded-lg text-xs cursor-pointer transition-all border
+                          ${isActive 
+                            ? 'bg-indigo-50 border-indigo-200 text-indigo-900 shadow-sm ring-1 ring-indigo-200' 
+                            : 'bg-white border-transparent hover:bg-slate-50 hover:border-slate-200 text-slate-600'
+                          }`}
+                      >
+                         <div className="flex gap-2">
+                            <span className={`font-mono font-bold ${isActive ? 'text-indigo-500' : 'text-slate-300'}`}>
+                              {(idx + 1).toString().padStart(2, '0')}
+                            </span>
+                            <p className="line-clamp-2">{chunk}</p>
+                         </div>
+                      </div>
+                    );
+                  })
+                )}
+             </div>
+           </div>
+        </div>
+
+      </main>
     </div>
   );
 };
 
-export default AudioController;
+export default App;
