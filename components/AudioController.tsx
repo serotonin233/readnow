@@ -15,7 +15,7 @@ interface AudioControllerProps {
   onEngineChange: (engine: 'gemini' | 'browser') => void;
   selectedVoice: string;
   onVoiceChange: (voice: string) => void;
-  onRefreshVoices: () => void; // 新增回调
+  onRefreshVoices: () => void; // 必须确保这一行存在，否则构建会失败
   browserVoices: SpeechSynthesisVoice[];
   
   playbackRate: number;
