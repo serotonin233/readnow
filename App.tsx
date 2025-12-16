@@ -57,15 +57,16 @@ const App: React.FC = () => {
 
   // --- Browser TTS Initialization (iOS Optimized) ---
   
-  // 提取加载语音的逻辑为独立函数，以便手动刷新
-  // 增加返回值，告诉 UI 找到了多少个
   const refreshBrowserVoices = (): number => {
       const allVoices = window.speechSynthesis.getVoices();
       console.log(`[VoiceLoader] Found ${allVoices.length} raw voices.`);
       
-      // 1. 强力过滤：只保留中文语音
-      // 注意：iOS 可能会返回 "zh-CN", "zh-HK", "zh-TW"
-      const zhVoices = allVoices.filter(v => v.lang.toLowerCase().includes('zh'));
+      // 1. 强力过滤：保留所有中文相关语音
+      const zhVoices = allVoices.filter(v => {
+          const lang = v.lang.toLowerCase();
+          const name = v.name.toLowerCase();
+          return lang.includes('zh') || lang.includes('cmn') || lang.includes('yue') || name.includes('chinese');
+      });
       
       // 2. 智能排序
       const sorted = zhVoices.sort((a, b) => {
@@ -94,46 +95,40 @@ const App: React.FC = () => {
 
       setBrowserVoices(sorted);
       
-      // 如果之前选中的声音现在不在列表里了，重置选择
-      if (selectedVoice && !sorted.find(v => v.name === selectedVoice) && sorted.length > 0) {
-          setSelectedVoice(sorted[0].name);
-      } else if (sorted.length > 0 && !selectedVoice) {
-          setSelectedVoice(sorted[0].name);
+      // 只有当列表不为空且当前没有选中有效语音时，才重置选择
+      if (sorted.length > 0) {
+          const currentExists = sorted.some(v => v.name === selectedVoice);
+          if (!currentExists || !selectedVoice || selectedVoice === 'Kore') {
+              setSelectedVoice(sorted[0].name);
+          }
       }
       
       return sorted.length;
   };
 
-  // 专门用于“唤醒” iOS 语音列表的函数
-  // iOS Safari 有时必须播放点什么才能真正加载出声音列表
   const wakeUpBrowserTTS = () => {
       // 创建一个极短的静音发声
       const u = new SpeechSynthesisUtterance(" ");
-      u.volume = 0; // 静音
-      u.rate = 10;  // 极速
+      u.volume = 0; 
+      u.rate = 10;
       u.onend = () => {
-          console.log("[VoiceLoader] Wake up sequence finished. Refreshing list...");
           refreshBrowserVoices();
       };
       window.speechSynthesis.speak(u);
-      
-      // 同时直接尝试刷新一次，以防 speak 没触发
       refreshBrowserVoices();
   };
 
   useEffect(() => {
     refreshBrowserVoices();
     
-    // 标准事件
     if (window.speechSynthesis.onvoiceschanged !== undefined) {
       window.speechSynthesis.onvoiceschanged = () => refreshBrowserVoices();
     }
     
-    // 针对 iOS 的暴力轮询
+    // 轮询几次以防加载延迟
     let retryCount = 0;
     const interval = setInterval(() => {
         const count = refreshBrowserVoices();
-        // 如果找到了 LiLi 或 Yu-shu，或者已经试了很多次
         const foundEnhanced = browserVoices.some(v => v.name.includes('LiLi') || v.name.includes('Yu-shu'));
         if ((foundEnhanced && count > 0) || retryCount > 5) {
             clearInterval(interval);
@@ -187,31 +182,43 @@ const App: React.FC = () => {
 
   // --- Logic ---
 
-  // 【关键修复】: iOS 解锁音频引擎
-  // 必须在用户点击事件中同步调用
-  const unlockAudioContext = () => {
-    console.log("[Audio] Attempting to unlock AudioContext...");
+  // 【强力音频解锁】
+  // 使用振荡器播放极短的声音，比播放空 Buffer 更能确切唤醒硬件
+  const ensureAudioContextReady = () => {
+    console.log("[Audio] Attempting to ensure AudioContext is ready...");
+    
+    // 1. 如果不存在，立即创建
     if (!audioContextRef.current) {
       audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
     }
     
-    // 强制 Resume
-    if (audioContextRef.current.state === 'suspended') {
-       audioContextRef.current.resume().then(() => {
-           console.log("[Audio] Context resumed successfully.");
-       });
+    const ctx = audioContextRef.current;
+
+    // 2. 如果挂起，立即恢复
+    if (ctx.state === 'suspended') {
+       ctx.resume().then(() => console.log("[Audio] Context resumed."));
     }
     
-    // 播放一个极短的静音片段，彻底激活 iOS 浏览器的音频权限
+    // 3. 播放微弱声音 (不可听见的高频或极低音量) 以抢占音频通道
     try {
-        const buffer = audioContextRef.current.createBuffer(1, 1, 22050);
-        const source = audioContextRef.current.createBufferSource();
-        source.buffer = buffer;
-        source.connect(audioContextRef.current.destination);
-        source.start(0);
-        console.log("[Audio] Silent buffer played to unlock audio.");
+        const oscillator = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(440, ctx.currentTime); // A4 音
+        
+        // 音量极低，人耳几乎听不见，但足以激活硬件
+        gainNode.gain.setValueAtTime(0.001, ctx.currentTime);
+        
+        oscillator.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        
+        oscillator.start();
+        // 0.01秒后停止
+        oscillator.stop(ctx.currentTime + 0.01);
+        console.log("[Audio] Activation beep played.");
     } catch (e) {
-        console.error("[Audio] Failed to play silent buffer:", e);
+        console.error("[Audio] Failed to play activation beep:", e);
     }
   };
 
@@ -221,13 +228,11 @@ const App: React.FC = () => {
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     setChunkProgressIndex(-1);
 
-    // Stop Gemini Audio
     if (sourceNodeRef.current) {
       try { sourceNodeRef.current.stop(); } catch (e) {}
       sourceNodeRef.current = null;
     }
     
-    // Stop Browser Audio
     window.speechSynthesis.cancel();
     
     audioCacheRef.current.clear();
@@ -285,7 +290,7 @@ const App: React.FC = () => {
 
   const handleTextSubmit = (text: string) => {
       resetAudioState();
-      setFile(null); // Clear file
+      setFile(null);
       setVirtualFileName('手动输入文本.txt');
       setExtractedText(text);
       setStatus(AppStatus.IDLE);
@@ -298,11 +303,10 @@ const App: React.FC = () => {
       if (engine === 'gemini') {
           setSelectedVoice('Kore');
       } else {
-          // 切换到本地语音时，自动选中排名第一的语音（我们已经在 useEffect 里把 LiLi/Yu-shu 排到第一了）
           if (browserVoices.length > 0) {
-              setSelectedVoice(browserVoices[0].name);
+              const hasKore = browserVoices.find(v => v.name === 'Kore');
+              if (!hasKore) setSelectedVoice(browserVoices[0].name);
           } else {
-              // 尝试唤醒
               wakeUpBrowserTTS();
           }
       }
@@ -332,8 +336,8 @@ const App: React.FC = () => {
       
       if (currentSessionId !== sessionIdRef.current) return;
 
+      // 如果还没 Context，创建（主要用于非交互触发的预加载，尽管 handleStartProcess 会处理）
       if (!audioContextRef.current) {
-        // Fallback creation (should be handled by unlockAudioContext)
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       }
 
@@ -351,16 +355,12 @@ const App: React.FC = () => {
   const handleJumpToChunk = async (index: number) => {
     if (status === AppStatus.PARSING_PDF) return;
     
-    // 只要用户点击，尝试解锁音频
-    if (ttsEngine === 'gemini') unlockAudioContext();
+    // 【关键】用户交互瞬间解锁音频
+    if (ttsEngine === 'gemini') ensureAudioContextReady();
     
     isPlayingRef.current = false;
     setIsPlaying(false);
     
-    // Stop Logic for Jump
-    if (audioContextRef.current && audioContextRef.current.state === 'running') {
-        audioContextRef.current.suspend();
-    }
     if (sourceNodeRef.current) { try { sourceNodeRef.current.stop(); } catch(e) {} sourceNodeRef.current = null; }
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     window.speechSynthesis.cancel();
@@ -369,7 +369,6 @@ const App: React.FC = () => {
     
     let currentChunks = chunks;
     if (chunks.length === 0 && extractedText.trim().length > 0) {
-       // Fallback logic, should reuse existing logic from startProcess
        const chunkSize = ttsEngine === 'gemini' ? 200 : 2500;
        currentChunks = splitTextIntoChunks(extractedText, chunkSize);
        setChunks(currentChunks);
@@ -391,10 +390,9 @@ const App: React.FC = () => {
   const handleStartProcess = async () => {
     if (!extractedText) return;
     
-    // 【关键】：在用户点击“开始朗读”的一瞬间，立刻解锁 AudioContext
-    // 这能解决 iPhone 上 Gemini 缓冲后不播放的问题
+    // 【关键】必须在第一个异步操作(await)之前调用，确保是在点击事件的“同步”上下文中执行
     if (ttsEngine === 'gemini') {
-        unlockAudioContext();
+        ensureAudioContextReady();
     }
     
     resetAudioState();
@@ -411,7 +409,6 @@ const App: React.FC = () => {
 
     if (newChunks.length === 0) return;
 
-    // Start
     if (ttsEngine === 'gemini') {
         setStatus(AppStatus.GENERATING_AUDIO); 
         const currentSessionId = sessionIdRef.current;
@@ -456,7 +453,7 @@ const App: React.FC = () => {
     setIsPlaying(true);
     isPlayingRef.current = true;
     setStatus(AppStatus.PLAYING);
-    setChunkProgressIndex(0); // 重置高亮
+    setChunkProgressIndex(0);
 
     // === PATH A: BROWSER NATIVE TTS ===
     if (ttsEngine === 'browser') {
@@ -464,32 +461,27 @@ const App: React.FC = () => {
         utterance.rate = playbackRate; 
         
         let voiceObj = browserVoices.find(v => v.name === selectedVoice);
-        
         if (voiceObj) {
             utterance.voice = voiceObj;
         } else {
             utterance.lang = 'zh-CN';
         }
         
-        // --- 核心：使用 onboundary 实现逐词高亮 ---
         utterance.onboundary = (event) => {
             if (event.name === 'word' || event.name === 'sentence') {
-                // 更新当前字符索引，TextPreview 组件会据此渲染高亮
                 setChunkProgressIndex(event.charIndex);
             }
         };
 
         utterance.onend = () => {
             if (isPlayingRef.current && sessionIdRef.current === currentSessionId) {
-                setChunkProgressIndex(-1); // 结束本段
+                setChunkProgressIndex(-1);
                 playSequence(index + 1, currentChunks);
             }
         };
 
         utterance.onerror = (e) => {
-            if (e.error === 'interrupted' || e.error === 'canceled') {
-                return;
-            }
+            if (e.error === 'interrupted' || e.error === 'canceled') return;
             console.error("Browser TTS Error:", e.error, e);
             setIsPlaying(false);
             isPlayingRef.current = false;
@@ -501,17 +493,15 @@ const App: React.FC = () => {
 
     // === PATH B: GEMINI AI TTS ===
     if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        ensureAudioContextReady();
     }
     
-    // 再次确保 Resume (解决 Gemini 自动结束问题)
-    if (audioContextRef.current.state === 'suspended') {
+    // 再次检查并 Resume
+    if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
       try {
-        console.log("Resuming AudioContext before playback...");
+        console.log("Resuming suspended context inside playSequence");
         await audioContextRef.current.resume();
-      } catch (e) {
-        console.error("Audio Context Resume Failed", e);
-      }
+      } catch (e) { console.error(e); }
     }
 
     let buffer = audioCacheRef.current.get(index);
@@ -520,10 +510,7 @@ const App: React.FC = () => {
       setStatus(AppStatus.GENERATING_AUDIO);
       await preloadGeminiChunk(index, currentSessionId);
       
-      if (sessionIdRef.current !== currentSessionId) {
-          console.log("Session changed during buffering.");
-          return;
-      }
+      if (sessionIdRef.current !== currentSessionId) return;
 
       buffer = audioCacheRef.current.get(index);
       if (!buffer) {
@@ -545,19 +532,24 @@ const App: React.FC = () => {
         }
     }, 5000);
 
+    if (!audioContextRef.current) return;
+    
     const source = audioContextRef.current.createBufferSource();
     source.buffer = buffer;
     source.playbackRate.value = playbackRate;
     source.connect(audioContextRef.current.destination);
 
     const offset = pausedTimeRef.current;
+    
+    // 播放前再次确认
+    if (audioContextRef.current.state === 'suspended') {
+        await audioContextRef.current.resume();
+    }
+    
     source.start(0, offset);
     startTimeRef.current = audioContextRef.current.currentTime;
     sourceNodeRef.current = source;
 
-    // --- 核心：Gemini 模式下的估算高亮逻辑 ---
-    // 由于后端不返回时间戳，我们根据音频时长和播放进度进行线性估算
-    // 效果类似于卡拉OK，虽然不是绝对精准，但视觉体验很好
     const bufferDuration = buffer.duration;
     const chunkTextLength = currentChunks[index].length;
     
@@ -567,17 +559,13 @@ const App: React.FC = () => {
         }
 
         const currentTime = audioContextRef.current.currentTime;
-        // 计算当前音频播放了多少秒（考虑变速）
-        // 注意：currentTime 是全局时间，startTimeRef 是开始播放时的全局时间
         const elapsedRealTime = currentTime - startTimeRef.current;
-        const elapsedAudioTime = elapsedRealTime * playbackRate + offset; // 加上之前的偏移
+        const elapsedAudioTime = elapsedRealTime * playbackRate + offset;
 
         if (elapsedAudioTime >= bufferDuration) {
             setChunkProgressIndex(chunkTextLength);
         } else {
-            // 进度比例
             const ratio = elapsedAudioTime / bufferDuration;
-            // 估算当前字符位置
             const estimatedIndex = Math.floor(ratio * chunkTextLength);
             setChunkProgressIndex(estimatedIndex);
             
@@ -591,7 +579,6 @@ const App: React.FC = () => {
 
     source.onended = () => {
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-      // 必须再次检查 isPlayingRef，因为 stop() 也会触发 onended
       if (isPlayingRef.current && sessionIdRef.current === currentSessionId) {
         pausedTimeRef.current = 0;
         setChunkProgressIndex(-1);
@@ -609,17 +596,12 @@ const App: React.FC = () => {
     if (ttsEngine === 'browser') {
         window.speechSynthesis.cancel(); 
     } else {
-        // 关键修复：iOS Safari 上 AudioContext 需要 suspend 才能立即停止声音
         if (audioContextRef.current && audioContextRef.current.state === 'running') {
             audioContextRef.current.suspend();
         }
 
         if (sourceNodeRef.current) {
-            try {
-               sourceNodeRef.current.stop();
-            } catch(e) {}
-            
-            // 记录暂停位置
+            try { sourceNodeRef.current.stop(); } catch(e) {}
             if (audioContextRef.current) {
                 const elapsed = (audioContextRef.current.currentTime - startTimeRef.current) * playbackRate;
                 pausedTimeRef.current = pausedTimeRef.current + elapsed;
@@ -637,9 +619,7 @@ const App: React.FC = () => {
          }
      }
      
-     // Resume 时也需要解锁，防止长时间暂停后 Context 被浏览器冻结
-     if (ttsEngine === 'gemini') unlockAudioContext();
-     
+     if (ttsEngine === 'gemini') ensureAudioContextReady();
      playSequence(currentChunkIndex);
   };
 
