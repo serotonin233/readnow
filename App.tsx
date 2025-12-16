@@ -60,6 +60,7 @@ const App: React.FC = () => {
   // 提取加载语音的逻辑为独立函数，以便手动刷新
   const refreshBrowserVoices = () => {
       const allVoices = window.speechSynthesis.getVoices();
+      console.log(`Refreshing voices: found ${allVoices.length}`);
       
       // 1. 强力过滤：只保留中文语音
       const zhVoices = allVoices.filter(v => v.lang.toLowerCase().includes('zh'));
@@ -90,7 +91,6 @@ const App: React.FC = () => {
       });
 
       setBrowserVoices(sorted);
-      console.log("Loaded voices:", sorted.length);
   };
 
   useEffect(() => {
