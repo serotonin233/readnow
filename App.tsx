@@ -59,28 +59,29 @@ const App: React.FC = () => {
   // --- Browser TTS Initialization (iOS Optimized) ---
   
   const refreshBrowserVoices = (): number => {
-      // 在 iOS 上，有时需要先 resume 才能获取 voices
+      // 1. 尝试 Resume (iOS Safari 有时会暂停 AudioContext 导致 getVoices 为空)
       if (window.speechSynthesis.paused) {
           window.speechSynthesis.resume();
       }
 
+      // 2. 获取列表
       const allVoices = window.speechSynthesis.getVoices();
       console.log(`[VoiceLoader] Found ${allVoices.length} raw voices.`);
       
-      // 1. 强力过滤：保留所有中文相关语音
+      // 3. 过滤中文
       const zhVoices = allVoices.filter(v => {
           const lang = v.lang.toLowerCase();
           const name = v.name.toLowerCase();
           return lang.includes('zh') || lang.includes('cmn') || lang.includes('yue') || name.includes('chinese');
       });
       
-      // 2. 智能排序
+      // 4. 智能排序
       const sorted = zhVoices.sort((a, b) => {
          const getScore = (voice: SpeechSynthesisVoice) => {
             const name = voice.name.toLowerCase();
             const lang = voice.lang.toLowerCase();
             
-            // Tier 0: 用户明确想要的 Binbin
+            // Tier 0: 用户明确想要的 Binbin/彬彬
             if (name.includes('binbin') || name.includes('彬彬')) return 200;
 
             // Tier 1: iOS/Mac 顶级神仙语音
@@ -104,34 +105,28 @@ const App: React.FC = () => {
 
       setBrowserVoices(sorted);
       
-      // 【修改】如果不在 Gemini 模式，且当前没选中声音，或者选中的声音不在列表里了
-      // 默认选中列表里的第一个（也就是我们排序后最好的那个，比如 Binbin），而不是 SYSTEM_DEFAULT
-      // 因为 SYSTEM_DEFAULT 在 iOS Safari 上大概率是 TingTing，而不是用户想要的 Binbin
       const isGeminiMode = selectedVoice === 'Kore' || GEMINI_VOICES_ID.includes(selectedVoice);
       
-      if (!isGeminiMode) {
-          const currentExists = sorted.some(v => v.name === selectedVoice);
-          // 如果当前选的 voice 已经不在列表里了（或者根本没选），且有可用列表，则选第一个
-          if ((!selectedVoice || !currentExists) && sorted.length > 0) {
+      if (!selectedVoice || (isGeminiMode && sorted.length > 0)) {
+           if (sorted.length > 0) {
               setSelectedVoice(sorted[0].name);
-          }
+           }
       }
-      
+
       return sorted.length;
   };
 
-  // 辅助：判断是否是 Gemini 的 ID
   const GEMINI_VOICES_ID = ['Kore', 'Zephyr', 'Puck', 'Fenrir', 'Charon'];
 
   const wakeUpBrowserTTS = () => {
-      // 必须先 cancel，防止队列卡死
+      console.log("[VoiceLoader] Waking up browser TTS...");
       window.speechSynthesis.cancel();
       
-      // 创建一个极短的静音发声
       const u = new SpeechSynthesisUtterance(" ");
       u.volume = 0; 
       u.rate = 10;
       u.onend = () => {
+          console.log("[VoiceLoader] Wake up complete, refreshing...");
           refreshBrowserVoices();
       };
       window.speechSynthesis.speak(u);
@@ -139,53 +134,38 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    // 1. 初始化尝试加载
     refreshBrowserVoices();
+    const handleVoicesChanged = () => {
+        console.log("[VoiceLoader] onvoiceschanged event triggered!");
+        refreshBrowserVoices();
+    };
+
+    window.speechSynthesis.onvoiceschanged = handleVoicesChanged;
     
-    // 2. 监听 voiceschanged (标准)
-    if (window.speechSynthesis.onvoiceschanged !== undefined) {
-      window.speechSynthesis.onvoiceschanged = () => refreshBrowserVoices();
-    }
-    
-    // 3. 监听 VisibilityChange
     const handleVisibilityChange = () => {
         if (!document.hidden) {
-            setTimeout(() => {
-                wakeUpBrowserTTS();
-            }, 300);
+            setTimeout(wakeUpBrowserTTS, 200);
         }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    // 4. 监听 Focus
     const handleFocus = () => {
          refreshBrowserVoices();
     };
     window.addEventListener('focus', handleFocus);
 
-    // 5. 兜底轮询
     let retryCount = 0;
     const interval = setInterval(() => {
         refreshBrowserVoices();
         retryCount++;
-        if (retryCount > 5) clearInterval(interval);
+        if (retryCount > 10) clearInterval(interval);
     }, 1000);
-
-    // 6. 全局交互监听
-    const handleInteraction = () => {
-        wakeUpBrowserTTS();
-        window.removeEventListener('click', handleInteraction);
-        window.removeEventListener('touchstart', handleInteraction);
-    };
-    window.addEventListener('click', handleInteraction);
-    window.addEventListener('touchstart', handleInteraction);
 
     return () => {
         clearInterval(interval);
+        window.speechSynthesis.onvoiceschanged = null; 
         document.removeEventListener('visibilitychange', handleVisibilityChange);
         window.removeEventListener('focus', handleFocus);
-        window.removeEventListener('click', handleInteraction);
-        window.removeEventListener('touchstart', handleInteraction);
     };
   }, []);
 
@@ -199,8 +179,6 @@ const App: React.FC = () => {
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     };
   }, []);
-
-  // --- Watchers ---
 
   useEffect(() => {
     if (sourceNodeRef.current) {
@@ -232,11 +210,9 @@ const App: React.FC = () => {
 
   // --- Logic ---
 
-  // 【强力音频解锁】
-  // 使用振荡器播放极短的声音，比播放空 Buffer 更能确切唤醒硬件
   const ensureAudioContextReady = () => {
     if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
     }
     
     const ctx = audioContextRef.current;
@@ -244,7 +220,6 @@ const App: React.FC = () => {
        ctx.resume();
     }
     
-    // 播放微弱声音激活硬件
     try {
         const oscillator = ctx.createOscillator();
         const gainNode = ctx.createGain();
@@ -341,14 +316,14 @@ const App: React.FC = () => {
       if (engine === 'gemini') {
           setSelectedVoice('Kore');
       } else {
-          // 【核心修改】
-          // 切换到本地语音时，不要再默认选中“SYSTEM_DEFAULT”了
-          // 而是直接选中列表里的第一个（我们已经把 Binbin 排在最前面了）
-          if (browserVoices.length > 0) {
-              setSelectedVoice(browserVoices[0].name);
-          } else {
-              setSelectedVoice('SYSTEM_DEFAULT');
+          if (browserVoices.length === 0) {
               wakeUpBrowserTTS();
+          }
+          const isGeminiVoice = GEMINI_VOICES_ID.includes(selectedVoice);
+          if (!selectedVoice || isGeminiVoice) {
+               if (browserVoices.length > 0) {
+                   setSelectedVoice(browserVoices[0].name);
+               }
           }
       }
       setStatus(AppStatus.IDLE);
@@ -378,15 +353,18 @@ const App: React.FC = () => {
       if (currentSessionId !== sessionIdRef.current) return;
 
       if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       }
 
+      // 【Bug修复】Base64解码可能会产生奇数字节，导致decodeAudioData崩溃
       const audioBytes = decodeBase64(base64Audio);
       const audioBuffer = await decodeAudioData(audioBytes, audioContextRef.current, 24000);
 
       audioCacheRef.current.set(index, audioBuffer);
-    } catch (error) {
-      console.error(`Error loading chunk ${index}`, error);
+    } catch (error: any) {
+      console.error(`Error loading chunk ${index}:`, error);
+      // 将错误向上传递，以便UI显示
+      throw error;
     } finally {
       fetchingSetRef.current.delete(index);
     }
@@ -395,7 +373,6 @@ const App: React.FC = () => {
   const handleJumpToChunk = async (index: number) => {
     if (status === AppStatus.PARSING_PDF) return;
     
-    // 【关键】用户交互瞬间解锁音频
     if (ttsEngine === 'gemini') ensureAudioContextReady();
     
     isPlayingRef.current = false;
@@ -432,6 +409,8 @@ const App: React.FC = () => {
     
     if (ttsEngine === 'gemini') {
         ensureAudioContextReady();
+    } else {
+        wakeUpBrowserTTS();
     }
     
     resetAudioState();
@@ -451,16 +430,28 @@ const App: React.FC = () => {
     if (ttsEngine === 'gemini') {
         setStatus(AppStatus.GENERATING_AUDIO); 
         const currentSessionId = sessionIdRef.current;
-        await preloadGeminiChunk(0, currentSessionId);
         
-        if (currentSessionId !== sessionIdRef.current) return;
+        try {
+            await preloadGeminiChunk(0, currentSessionId);
+            
+            if (currentSessionId !== sessionIdRef.current) return;
 
-        if (audioCacheRef.current.has(0)) {
-            setStatus(AppStatus.READY_TO_PLAY);
-            playSequence(0, newChunks); 
-        } else {
-            setErrorMsg("生成失败，请检查网络配置(API Key)或切换到“本地语音”模式。");
-            setStatus(AppStatus.IDLE);
+            if (audioCacheRef.current.has(0)) {
+                setStatus(AppStatus.READY_TO_PLAY);
+                playSequence(0, newChunks); 
+            }
+        } catch (e: any) {
+            // 【关键修改】捕获 preloadGeminiChunk 的错误并显示
+            console.error("Audio generation failed:", e);
+            setStatus(AppStatus.ERROR);
+            let msg = "生成语音失败";
+            if (e.message) {
+                if (e.message.includes("API Key")) msg = "API Key 配置错误";
+                else if (e.message.includes("quota")) msg = "API 配额不足";
+                else if (e.message.includes("RangeError")) msg = "音频数据解码失败";
+                else msg = e.message;
+            }
+            setErrorMsg(`${msg}。请重试或切换“本地语音”模式。`);
         }
     } else {
         setStatus(AppStatus.READY_TO_PLAY);
@@ -499,21 +490,16 @@ const App: React.FC = () => {
         const utterance = new SpeechSynthesisUtterance(currentChunks[index]);
         utterance.rate = playbackRate; 
         
-        // 【核心修改】明确语音选择逻辑
-        // 如果用户坚持选 "SYSTEM_DEFAULT"，我们只能用 null voice，这在 iOS Safari 上通常 = TingTing
-        // 如果用户选了具体的 voice (比如 Binbin)，我们必须传进去
-        if (selectedVoice === 'SYSTEM_DEFAULT') {
-             utterance.lang = 'zh-CN';
-             utterance.voice = null; 
-             console.log("Using System Default Voice for zh-CN (Likely TingTing)");
+        let voiceObj = browserVoices.find(v => v.name === selectedVoice);
+        
+        if (voiceObj) {
+            utterance.voice = voiceObj;
         } else {
-            let voiceObj = browserVoices.find(v => v.name === selectedVoice);
-            if (voiceObj) {
-                utterance.voice = voiceObj;
-            } else {
-                // Fallback
-                utterance.lang = 'zh-CN';
-            }
+             utterance.lang = 'zh-CN';
+        }
+        
+        if (selectedVoice === 'SYSTEM_DEFAULT') {
+             utterance.voice = null;
         }
         
         utterance.onboundary = (event) => {
@@ -555,27 +541,32 @@ const App: React.FC = () => {
 
     if (!buffer) {
       setStatus(AppStatus.GENERATING_AUDIO);
-      await preloadGeminiChunk(index, currentSessionId);
+      try {
+          await preloadGeminiChunk(index, currentSessionId);
+      } catch (e) {
+          if (sessionIdRef.current === currentSessionId) {
+              setIsPlaying(false);
+              isPlayingRef.current = false;
+              setStatus(AppStatus.ERROR);
+              setErrorMsg("生成音频失败，请检查网络。");
+          }
+          return;
+      }
       
       if (sessionIdRef.current !== currentSessionId) return;
 
       buffer = audioCacheRef.current.get(index);
       if (!buffer) {
-        if (sessionIdRef.current === currentSessionId) {
-            setIsPlaying(false);
-            isPlayingRef.current = false;
-            setStatus(AppStatus.ERROR);
-            setErrorMsg("缓冲超时，建议切换“本地语音”");
-        }
         return;
       }
       setStatus(AppStatus.PLAYING);
     }
 
-    preloadGeminiChunk(index + 1, currentSessionId);
+    // Preload next
+    preloadGeminiChunk(index + 1, currentSessionId).catch(() => {});
     setTimeout(() => {
         if (isPlayingRef.current && sessionIdRef.current === currentSessionId) {
-            preloadGeminiChunk(index + 2, currentSessionId);
+            preloadGeminiChunk(index + 2, currentSessionId).catch(() => {});
         }
     }, 5000);
 
