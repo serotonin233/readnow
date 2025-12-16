@@ -52,6 +52,7 @@ const formatVoiceLabel = (v: SpeechSynthesisVoice) => {
    // 标记高质量声音
    if (label.includes('LiLi') || label.includes('Yu-shu')) label = '✨ ' + label;
    else if (label.includes('Sin-ji')) label = '✨ ' + label;
+   else if (label.includes('Binbin') || label.includes('彬彬')) label = '🔥 ' + label; // 标记彬彬
    
    // 如果名字不包含区域信息，补充一下
    if (!label.match(/[\(（]/)) {
@@ -133,7 +134,7 @@ const AudioController: React.FC<AudioControllerProps> = ({
       list = GEMINI_VOICES.map(v => ({ id: v.id, name: v.name }));
     } else {
       // 1. 始终添加“系统默认”作为第一项
-      list.push({ id: 'SYSTEM_DEFAULT', name: '📱 系统默认 (跟随手机设置)' });
+      list.push({ id: 'SYSTEM_DEFAULT', name: '📱 系统默认 (不稳定)' });
 
       // 2. 获取当前浏览器返回的列表
       if (browserVoices.length > 0) {
@@ -157,11 +158,15 @@ const AudioController: React.FC<AudioControllerProps> = ({
       }
     }
 
-    // 排序：系统默认置顶，收藏次之，其他默认
+    // 排序：系统默认置顶，Binbin优先，收藏次之
     return list.sort((a, b) => {
       if (a.id === 'SYSTEM_DEFAULT') return -1;
       if (b.id === 'SYSTEM_DEFAULT') return 1;
 
+      // 让当前选中的排前面，方便查看
+      if (a.id === selectedVoice) return -1;
+      if (b.id === selectedVoice) return 1;
+      
       const aFav = favorites.has(a.id);
       const bFav = favorites.has(b.id);
       if (aFav && !bFav) return -1;
@@ -190,6 +195,13 @@ const AudioController: React.FC<AudioControllerProps> = ({
     const s = seconds % 60;
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
+
+  // 计算当前显示的名称
+  const currentDisplayName = useMemo(() => {
+      if (selectedVoice === 'SYSTEM_DEFAULT') return '系统默认 (Web API)';
+      const found = sortedVoices.find(v => v.id === selectedVoice);
+      return found ? found.name : selectedVoice;
+  }, [selectedVoice, sortedVoices]);
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
@@ -335,13 +347,22 @@ const AudioController: React.FC<AudioControllerProps> = ({
                 </button>
             </div>
 
+            {/* 当前选择状态显示 */}
+            <div className="mt-1 flex items-start gap-1.5 text-xs text-slate-500 bg-slate-50 p-2 rounded border border-slate-100">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 flex-shrink-0 text-indigo-500 mt-0.5">
+                    <path fillRule="evenodd" d="M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-7-4a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM9 9a.75.75 0 0 0 0 1.5h.253a.25.25 0 0 1 .244.304l-.459 2.066A1.75 1.75 0 0 0 10.747 15H11a.75.75 0 0 0 0-1.5h-.253a.25.25 0 0 1-.244-.304l.459-2.066A1.75 1.75 0 0 0 9.253 9H9Z" clipRule="evenodd" />
+                </svg>
+                <div>
+                   <span className="font-bold text-slate-600">当前选择:</span> {currentDisplayName}
+                </div>
+            </div>
+
              {/* iOS 增强语音教程 */}
             {ttsEngine === 'browser' && (
-                <div className="mt-2 p-3 bg-indigo-50 rounded-lg text-xs text-indigo-800 leading-relaxed border border-indigo-100">
-                   <p className="font-bold mb-1">📢 如何使用 LiLi 等高级语音？</p>
-                   <p className="mb-1">1. 在 iPhone 设置 &gt; 辅助功能 &gt; 朗读内容 &gt; 声音 中选择并下载 LiLi。</p>
-                   <p className="mb-1">2. 确保在系统设置中 LiLi 是<span className="font-bold">被选中</span>的状态。</p>
-                   <p className="text-red-600 font-semibold">3. 在本工具上方选择【系统默认 (跟随手机设置)】。</p>
+                <div className="mt-2 p-3 bg-amber-50 rounded-lg text-xs text-amber-800 leading-relaxed border border-amber-100">
+                   <p className="font-bold mb-1">📢 为什么“彬彬”变成了女声？</p>
+                   <p className="mb-1">因为 Safari 的“系统默认”并不总是等于您在 iOS 设置里选的声音（它通常默认为 TingTing）。</p>
+                   <p className="font-bold text-red-600 mt-1">✨ 请点击上方的下拉列表，直接找到并选中“Binbin (彬彬)”。</p>
                 </div>
             )}
           </div>
