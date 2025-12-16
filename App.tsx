@@ -21,6 +21,7 @@ const App: React.FC = () => {
 
   // TTS Settings
   const [ttsEngine, setTtsEngine] = useState<'gemini' | 'browser'>('gemini');
+  // 默认声音设为 Kore (Gemini)
   const [selectedVoice, setSelectedVoice] = useState<string>('Kore');
   const [playbackRate, setPlaybackRate] = useState<number>(1.0);
   const [browserVoices, setBrowserVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -79,6 +80,9 @@ const App: React.FC = () => {
             const name = voice.name.toLowerCase();
             const lang = voice.lang.toLowerCase();
             
+            // Tier 0: 用户明确想要的 Binbin
+            if (name.includes('binbin') || name.includes('彬彬')) return 200;
+
             // Tier 1: iOS/Mac 顶级神仙语音
             if (name.includes('lili')) return 100;
             if (name.includes('yu-shu') || name.includes('yushu')) return 90;
@@ -100,11 +104,17 @@ const App: React.FC = () => {
 
       setBrowserVoices(sorted);
       
-      // 【修改】如果不处于 Gemini 模式，且当前没有选声音，则默认使用“SYSTEM_DEFAULT”
-      // 而不是强制去选 sorted[0]，这样更符合用户“使用系统设置”的预期
+      // 【修改】如果不在 Gemini 模式，且当前没选中声音，或者选中的声音不在列表里了
+      // 默认选中列表里的第一个（也就是我们排序后最好的那个，比如 Binbin），而不是 SYSTEM_DEFAULT
+      // 因为 SYSTEM_DEFAULT 在 iOS Safari 上大概率是 TingTing，而不是用户想要的 Binbin
       const isGeminiMode = selectedVoice === 'Kore' || GEMINI_VOICES_ID.includes(selectedVoice);
-      if (!isGeminiMode && !selectedVoice) {
-          setSelectedVoice('SYSTEM_DEFAULT');
+      
+      if (!isGeminiMode) {
+          const currentExists = sorted.some(v => v.name === selectedVoice);
+          // 如果当前选的 voice 已经不在列表里了（或者根本没选），且有可用列表，则选第一个
+          if ((!selectedVoice || !currentExists) && sorted.length > 0) {
+              setSelectedVoice(sorted[0].name);
+          }
       }
       
       return sorted.length;
@@ -137,11 +147,9 @@ const App: React.FC = () => {
       window.speechSynthesis.onvoiceschanged = () => refreshBrowserVoices();
     }
     
-    // 3. 【关键修复】监听 VisibilityChange
+    // 3. 监听 VisibilityChange
     const handleVisibilityChange = () => {
         if (!document.hidden) {
-            console.log("[App] Page became visible, refreshing voices...");
-            // 延迟一点点执行，给浏览器内核喘息时间
             setTimeout(() => {
                 wakeUpBrowserTTS();
             }, 300);
@@ -149,27 +157,22 @@ const App: React.FC = () => {
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    // 4. 【关键修复】监听 Focus
+    // 4. 监听 Focus
     const handleFocus = () => {
-         console.log("[App] Window focused, refreshing voices...");
          refreshBrowserVoices();
     };
     window.addEventListener('focus', handleFocus);
 
-    // 5. 修复闭包陷阱的暴力轮询 (兜底)
+    // 5. 兜底轮询
     let retryCount = 0;
     const interval = setInterval(() => {
         refreshBrowserVoices();
         retryCount++;
-        // 轮询 10 秒后停止，主要为了应对 iOS 冷启动慢
-        if (retryCount > 10) {
-            clearInterval(interval);
-        }
+        if (retryCount > 5) clearInterval(interval);
     }, 1000);
 
-    // 6. 全局交互监听 (iOS 终极必杀技)
+    // 6. 全局交互监听
     const handleInteraction = () => {
-        console.log("[App] User interaction detected, waking up TTS...");
         wakeUpBrowserTTS();
         window.removeEventListener('click', handleInteraction);
         window.removeEventListener('touchstart', handleInteraction);
@@ -232,41 +235,28 @@ const App: React.FC = () => {
   // 【强力音频解锁】
   // 使用振荡器播放极短的声音，比播放空 Buffer 更能确切唤醒硬件
   const ensureAudioContextReady = () => {
-    console.log("[Audio] Attempting to ensure AudioContext is ready...");
-    
-    // 1. 如果不存在，立即创建
-    // 【关键修复】不传递 sampleRate 参数，让浏览器自动适配硬件采样率（iOS 上强制 24000 可能导致失败）
     if (!audioContextRef.current) {
       audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     }
     
     const ctx = audioContextRef.current;
-
-    // 2. 如果挂起，立即恢复
     if (ctx.state === 'suspended') {
-       ctx.resume().then(() => console.log("[Audio] Context resumed."));
+       ctx.resume();
     }
     
-    // 3. 播放微弱声音 (不可听见的高频或极低音量) 以抢占音频通道
+    // 播放微弱声音激活硬件
     try {
         const oscillator = ctx.createOscillator();
         const gainNode = ctx.createGain();
-        
         oscillator.type = 'sine';
-        oscillator.frequency.setValueAtTime(440, ctx.currentTime); // A4 音
-        
-        // 音量极低，人耳几乎听不见，但足以激活硬件
+        oscillator.frequency.setValueAtTime(440, ctx.currentTime);
         gainNode.gain.setValueAtTime(0.001, ctx.currentTime);
-        
         oscillator.connect(gainNode);
         gainNode.connect(ctx.destination);
-        
         oscillator.start();
-        // 0.01秒后停止
         oscillator.stop(ctx.currentTime + 0.01);
-        console.log("[Audio] Activation beep played.");
     } catch (e) {
-        console.error("[Audio] Failed to play activation beep:", e);
+        console.error(e);
     }
   };
 
@@ -351,11 +341,13 @@ const App: React.FC = () => {
       if (engine === 'gemini') {
           setSelectedVoice('Kore');
       } else {
-          // 【修改】切换到本地引擎时，默认直接选中“SYSTEM_DEFAULT”
-          // 这符合大多数希望直接使用系统设置的用户的预期
-          setSelectedVoice('SYSTEM_DEFAULT');
-          
-          if (browserVoices.length === 0) {
+          // 【核心修改】
+          // 切换到本地语音时，不要再默认选中“SYSTEM_DEFAULT”了
+          // 而是直接选中列表里的第一个（我们已经把 Binbin 排在最前面了）
+          if (browserVoices.length > 0) {
+              setSelectedVoice(browserVoices[0].name);
+          } else {
+              setSelectedVoice('SYSTEM_DEFAULT');
               wakeUpBrowserTTS();
           }
       }
@@ -385,14 +377,11 @@ const App: React.FC = () => {
       
       if (currentSessionId !== sessionIdRef.current) return;
 
-      // 如果还没 Context，创建（主要用于非交互触发的预加载，尽管 handleStartProcess 会处理）
-      // 【关键修复】不带参数创建
       if (!audioContextRef.current) {
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
       }
 
       const audioBytes = decodeBase64(base64Audio);
-      // 解码时，指定原始采样率为 24000 (Gemini输出)，AudioContext 会自动重采样以匹配硬件
       const audioBuffer = await decodeAudioData(audioBytes, audioContextRef.current, 24000);
 
       audioCacheRef.current.set(index, audioBuffer);
@@ -441,7 +430,6 @@ const App: React.FC = () => {
   const handleStartProcess = async () => {
     if (!extractedText) return;
     
-    // 【关键】必须在第一个异步操作(await)之前调用，确保是在点击事件的“同步”上下文中执行
     if (ttsEngine === 'gemini') {
         ensureAudioContextReady();
     }
@@ -511,16 +499,19 @@ const App: React.FC = () => {
         const utterance = new SpeechSynthesisUtterance(currentChunks[index]);
         utterance.rate = playbackRate; 
         
-        // 【修改】系统默认声音逻辑
-        // 如果选择的是“系统默认”，则不设置 voice 属性，iOS 会自动使用“系统设置”里的声音
+        // 【核心修改】明确语音选择逻辑
+        // 如果用户坚持选 "SYSTEM_DEFAULT"，我们只能用 null voice，这在 iOS Safari 上通常 = TingTing
+        // 如果用户选了具体的 voice (比如 Binbin)，我们必须传进去
         if (selectedVoice === 'SYSTEM_DEFAULT') {
              utterance.lang = 'zh-CN';
-             // 明确不设置 utterance.voice
+             utterance.voice = null; 
+             console.log("Using System Default Voice for zh-CN (Likely TingTing)");
         } else {
             let voiceObj = browserVoices.find(v => v.name === selectedVoice);
             if (voiceObj) {
                 utterance.voice = voiceObj;
             } else {
+                // Fallback
                 utterance.lang = 'zh-CN';
             }
         }
@@ -554,10 +545,8 @@ const App: React.FC = () => {
         ensureAudioContextReady();
     }
     
-    // 再次检查并 Resume
     if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
       try {
-        console.log("Resuming suspended context inside playSequence");
         await audioContextRef.current.resume();
       } catch (e) { console.error(e); }
     }
@@ -599,7 +588,6 @@ const App: React.FC = () => {
 
     const offset = pausedTimeRef.current;
     
-    // 播放前再次确认
     if (audioContextRef.current.state === 'suspended') {
         await audioContextRef.current.resume();
     }
