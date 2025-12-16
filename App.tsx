@@ -56,34 +56,33 @@ const App: React.FC = () => {
   const activeChunkRef = useRef<HTMLDivElement>(null);
 
   // --- Browser TTS Initialization (iOS Optimized) ---
-  useEffect(() => {
-    const loadVoices = () => {
+  
+  // 提取加载语音的逻辑为独立函数，以便手动刷新
+  const refreshBrowserVoices = () => {
       const allVoices = window.speechSynthesis.getVoices();
       
-      // 1. 强力过滤：只保留中文语音 (zh-CN, zh-HK, zh-TW)
-      // 这能解决 iPhone 上列表过长的问题
+      // 1. 强力过滤：只保留中文语音
       const zhVoices = allVoices.filter(v => v.lang.toLowerCase().includes('zh'));
       
-      // 2. 智能排序：优先显示 iOS/macOS 高质量语音
+      // 2. 智能排序
       const sorted = zhVoices.sort((a, b) => {
          const getScore = (voice: SpeechSynthesisVoice) => {
             const name = voice.name.toLowerCase();
             const lang = voice.lang.toLowerCase();
             
-            // Tier 1: iOS/Mac 顶级神仙语音 (如有增强版)
-            if (name.includes('lili')) return 100;         // LiLi (女声，极佳)
-            if (name.includes('yu-shu') || name.includes('yushu')) return 90; // Yu-shu (男声，极佳)
-            if (name.includes('sin-ji') || name.includes('sinji')) return 85; // Sin-ji (香港女声，很有感情)
-            if (name.includes('mei-jia') || name.includes('meijia')) return 80; // 台湾美嘉
+            // Tier 1: iOS/Mac 顶级神仙语音
+            if (name.includes('lili')) return 100;
+            if (name.includes('yu-shu') || name.includes('yushu')) return 90;
+            if (name.includes('sin-ji') || name.includes('sinji')) return 85;
+            if (name.includes('mei-jia') || name.includes('meijia')) return 80;
             
-            // Tier 2: 微软/谷歌高质量
+            // Tier 2: 微软/谷歌
             if (name.includes('xiaoxiao') || name.includes('yunxi')) return 70;
             if (name.includes('google')) return 60;
             
-            // Tier 3: 传统语音
+            // Tier 3: 传统
             if (name.includes('ting-ting') || name.includes('tingting')) return 50;
             
-            // Fallback: 优先大陆普通话
             if (lang === 'zh-cn') return 40;
             return 30;
          };
@@ -91,22 +90,28 @@ const App: React.FC = () => {
       });
 
       setBrowserVoices(sorted);
-    };
+      console.log("Loaded voices:", sorted.length);
+  };
 
-    loadVoices();
+  useEffect(() => {
+    refreshBrowserVoices();
     
-    // 监听语音库加载事件 (Chrome/Safari 需要)
     if (window.speechSynthesis.onvoiceschanged !== undefined) {
-      window.speechSynthesis.onvoiceschanged = loadVoices;
+      window.speechSynthesis.onvoiceschanged = refreshBrowserVoices;
     }
     
-    // 轮询兜底，防止部分移动端浏览器事件不触发
+    // 针对 iOS 的暴力轮询，确保刚下载的语音能刷出来
     let retryCount = 0;
     const interval = setInterval(() => {
         const voices = window.speechSynthesis.getVoices();
-        if (voices.length > 0 || retryCount > 5) {
-            loadVoices();
+        // 如果找到了 LiLi 或 Yu-shu，或者重试次数够了
+        const foundEnhanced = voices.some(v => v.name.includes('LiLi') || v.name.includes('Yu-shu'));
+        if (foundEnhanced || retryCount > 10) {
+            refreshBrowserVoices();
             clearInterval(interval);
+        } else {
+             // 即使没找到增强语音，也尝试更新列表
+             refreshBrowserVoices();
         }
         retryCount++;
     }, 1000);
@@ -156,6 +161,25 @@ const App: React.FC = () => {
   }, [isPlaying, timeLeft]);
 
   // --- Logic ---
+
+  // 【关键修复】: iOS 解锁音频引擎
+  // 必须在用户点击事件中同步调用
+  const unlockAudioContext = () => {
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+    }
+    
+    if (audioContextRef.current.state === 'suspended') {
+       audioContextRef.current.resume();
+    }
+    
+    // 播放一个极短的静音片段，彻底激活 iOS 浏览器的音频权限
+    const buffer = audioContextRef.current.createBuffer(1, 1, 22050);
+    const source = audioContextRef.current.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContextRef.current.destination);
+    source.start(0);
+  };
 
   const resetAudioState = () => {
     isPlayingRef.current = false;
@@ -272,6 +296,7 @@ const App: React.FC = () => {
       if (currentSessionId !== sessionIdRef.current) return;
 
       if (!audioContextRef.current) {
+        // Fallback creation (should be handled by unlockAudioContext)
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       }
 
@@ -288,6 +313,9 @@ const App: React.FC = () => {
 
   const handleJumpToChunk = async (index: number) => {
     if (status === AppStatus.PARSING_PDF) return;
+    
+    // 只要用户点击，尝试解锁音频
+    if (ttsEngine === 'gemini') unlockAudioContext();
     
     isPlayingRef.current = false;
     setIsPlaying(false);
@@ -326,6 +354,12 @@ const App: React.FC = () => {
   const handleStartProcess = async () => {
     if (!extractedText) return;
     
+    // 【关键】：在用户点击“开始朗读”的一瞬间，立刻解锁 AudioContext
+    // 这能解决 iPhone 上 Gemini 缓冲后不播放的问题
+    if (ttsEngine === 'gemini') {
+        unlockAudioContext();
+    }
+    
     resetAudioState();
     
     if (timerDuration > 0) {
@@ -334,9 +368,6 @@ const App: React.FC = () => {
       setTimeLeft(null);
     }
     
-    // 关键优化：根据引擎选择不同的切分粒度
-    // Gemini: 200字符 (约1-2句话)，为了减少等待时间，流式感更强
-    // Browser: 2500字符，减少段落间的机械停顿
     const chunkSize = ttsEngine === 'gemini' ? 200 : 2500;
     const newChunks = splitTextIntoChunks(extractedText, chunkSize);
     setChunks(newChunks);
@@ -436,7 +467,7 @@ const App: React.FC = () => {
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
     }
     
-    // 关键修复：确保 context 是运行状态 (从 suspend 恢复)
+    // 再次确保 Resume
     if (audioContextRef.current.state === 'suspended') {
       try {
         await audioContextRef.current.resume();
@@ -567,6 +598,10 @@ const App: React.FC = () => {
              return;
          }
      }
+     
+     // Resume 时也需要解锁，防止长时间暂停后 Context 被浏览器冻结
+     if (ttsEngine === 'gemini') unlockAudioContext();
+     
      playSequence(currentChunkIndex);
   };
 
@@ -661,6 +696,7 @@ const App: React.FC = () => {
              onEngineChange={handleEngineChange}
              selectedVoice={selectedVoice}
              onVoiceChange={handleVoiceChange}
+             onRefreshVoices={refreshBrowserVoices}
              browserVoices={browserVoices}
              
              playbackRate={playbackRate}
