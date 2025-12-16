@@ -1,6 +1,9 @@
+
 // 将 Base64 字符串解码为 Uint8Array
 export function decodeBase64(base64: string): Uint8Array {
-  const binaryString = atob(base64);
+  // 移除可能存在的换行符和空格
+  const cleanBase64 = base64.replace(/[\r\n\s]/g, '');
+  const binaryString = atob(cleanBase64);
   const len = binaryString.length;
   const bytes = new Uint8Array(len);
   for (let i = 0; i < len; i++) {
@@ -16,7 +19,15 @@ export async function decodeAudioData(
   sampleRate: number = 24000,
   numChannels: number = 1
 ): Promise<AudioBuffer> {
-  const dataInt16 = new Int16Array(data.buffer);
+  // 【关键修复】确保字节长度是 2 的倍数 (16-bit PCM 需要偶数字节)
+  // 如果 API 返回了奇数字节（例如 1001 字节），直接 new Int16Array 会抛出 RangeError
+  let safeData = data;
+  if (data.byteLength % 2 !== 0) {
+      console.warn(`[AudioUtils] Received odd byte length (${data.byteLength}), trimming last byte.`);
+      safeData = data.subarray(0, data.byteLength - 1);
+  }
+
+  const dataInt16 = new Int16Array(safeData.buffer, safeData.byteOffset, safeData.byteLength / 2);
   const frameCount = dataInt16.length / numChannels;
   
   // 创建 AudioBuffer
