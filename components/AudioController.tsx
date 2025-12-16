@@ -134,7 +134,7 @@ const AudioController: React.FC<AudioControllerProps> = ({
       list = GEMINI_VOICES.map(v => ({ id: v.id, name: v.name }));
     } else {
       // 1. 始终添加“系统默认”作为第一项
-      list.push({ id: 'SYSTEM_DEFAULT', name: '📱 系统默认 (不稳定)' });
+      list.push({ id: 'SYSTEM_DEFAULT', name: '📱 系统默认 (跟随手机设置)' });
 
       // 2. 获取当前浏览器返回的列表
       if (browserVoices.length > 0) {
@@ -178,6 +178,15 @@ const AudioController: React.FC<AudioControllerProps> = ({
 
   const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     onVoiceChange(e.target.value);
+  };
+  
+  // 【关键】当用户尝试点击或聚焦下拉菜单时，强制刷新列表
+  // 此时属于“用户显式交互”，浏览器会解禁 getVoices 返回完整列表
+  const handleInteraction = () => {
+      if (ttsEngine === 'browser') {
+          console.log("[AudioController] User interacted with dropdown, triggering refresh...");
+          onRefreshVoices();
+      }
   };
 
   const defaultIndex = 4; 
@@ -316,6 +325,10 @@ const AudioController: React.FC<AudioControllerProps> = ({
                 <select 
                   value={selectedVoice} 
                   onChange={handleVoiceChange}
+                  // 【核心修复】利用用户点击下拉菜单的交互事件，强制唤醒浏览器语音列表
+                  // 这直接绕过了 iOS 的隐私屏蔽机制（指纹保护），因为用户产生了显式交互
+                  onFocus={handleInteraction}
+                  onClick={handleInteraction}
                   className="flex-1 min-w-0 p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
                 >
                   {sortedVoices.map(v => (
@@ -360,9 +373,9 @@ const AudioController: React.FC<AudioControllerProps> = ({
              {/* iOS 增强语音教程 */}
             {ttsEngine === 'browser' && (
                 <div className="mt-2 p-3 bg-amber-50 rounded-lg text-xs text-amber-800 leading-relaxed border border-amber-100">
-                   <p className="font-bold mb-1">📢 为什么“彬彬”变成了女声？</p>
-                   <p className="mb-1">因为 Safari 的“系统默认”并不总是等于您在 iOS 设置里选的声音（它通常默认为 TingTing）。</p>
-                   <p className="font-bold text-red-600 mt-1">✨ 请点击上方的下拉列表，直接找到并选中“Binbin (彬彬)”。</p>
+                   <p className="font-bold mb-1">📢 看不到“彬彬”或“莉莉”？</p>
+                   <p className="mb-1">这是 iOS 的隐私保护机制。</p>
+                   <p className="font-bold text-red-600 mt-1">✨ 请尝试点击上方的选择框，或刷新网页，列表通常会自动加载。</p>
                 </div>
             )}
           </div>
