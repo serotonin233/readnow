@@ -15,6 +15,7 @@ interface AudioControllerProps {
   onEngineChange: (engine: 'gemini' | 'browser') => void;
   selectedVoice: string;
   onVoiceChange: (voice: string) => void;
+  onRefreshVoices: () => void; // 新增回调
   browserVoices: SpeechSynthesisVoice[];
   
   playbackRate: number;
@@ -73,6 +74,7 @@ const AudioController: React.FC<AudioControllerProps> = ({
   onEngineChange,
   selectedVoice,
   onVoiceChange,
+  onRefreshVoices,
   browserVoices,
   playbackRate,
   onPlaybackRateChange,
@@ -234,9 +236,23 @@ const AudioController: React.FC<AudioControllerProps> = ({
           <div className="space-y-1">
             <div className="flex justify-between items-center">
                 <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">选择声音</label>
-                <span className="text-[10px] text-slate-400">
-                   {isCurrentFavorite ? '★ 已收藏' : ''}
-                </span>
+                <div className="flex gap-1 items-center">
+                    <span className="text-[10px] text-slate-400">
+                        {isCurrentFavorite ? '★ 已收藏' : ''}
+                    </span>
+                    {ttsEngine === 'browser' && (
+                        <button 
+                            onClick={onRefreshVoices}
+                            className="text-xs text-indigo-600 hover:text-indigo-800 flex items-center gap-0.5"
+                            title="刷新语音列表"
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+                            </svg>
+                            刷新
+                        </button>
+                    )}
+                </div>
             </div>
             
             <div className="flex gap-2">
@@ -283,7 +299,7 @@ const AudioController: React.FC<AudioControllerProps> = ({
                       <li>打开 <strong>设置 &gt; 辅助功能 &gt; 朗读内容</strong></li>
                       <li>点击 <strong>声音 &gt; 中文</strong></li>
                       <li>找到 <strong>LiLi</strong> 或 <strong>Yu-shu</strong>，点击下载并选择 <strong>“增强版”</strong></li>
-                      <li>回到本网页，刷新即可在上方列表中看到新声音。</li>
+                      <li>回到本网页，点击上方列表旁的 <strong>“刷新”</strong> 按钮。</li>
                    </ol>
                 </div>
             )}
