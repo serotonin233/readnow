@@ -157,21 +157,42 @@ const App: React.FC = () => {
     };
     window.addEventListener('focus', handleFocus);
 
-    // 5. 暴力轮询 (兜底)
+    // 5. 修复闭包陷阱的暴力轮询 (兜底)
+    // 这里的 interval 闭包里不能依赖 React State，必须直接调用 window API
     let retryCount = 0;
     const interval = setInterval(() => {
-        const count = refreshBrowserVoices();
-        const foundEnhanced = browserVoices.some(v => v.name.includes('LiLi') || v.name.includes('Yu-shu'));
-        if ((foundEnhanced && count > 0) || retryCount > 5) {
+        const voices = window.speechSynthesis.getVoices();
+        const foundEnhanced = voices.some(v => v.name.includes('LiLi') || v.name.includes('Yu-shu'));
+        
+        // 每次轮询都尝试更新 React State
+        refreshBrowserVoices();
+
+        // 如果找到了增强语音，或者尝试了 20 次 (20秒)，则停止
+        // 延长到 20 秒是因为 iOS 冷启动非常慢
+        if (foundEnhanced || retryCount > 20) {
             clearInterval(interval);
         }
         retryCount++;
     }, 1000);
 
+    // 6. 【新增】全局交互监听 (iOS 终极必杀技)
+    // 很多时候只有用户点了一下屏幕，iOS 才会真正加载语音
+    const handleInteraction = () => {
+        console.log("[App] User interaction detected, waking up TTS...");
+        wakeUpBrowserTTS();
+        // 只需要触发一次即可
+        window.removeEventListener('click', handleInteraction);
+        window.removeEventListener('touchstart', handleInteraction);
+    };
+    window.addEventListener('click', handleInteraction);
+    window.addEventListener('touchstart', handleInteraction);
+
     return () => {
         clearInterval(interval);
         document.removeEventListener('visibilitychange', handleVisibilityChange);
         window.removeEventListener('focus', handleFocus);
+        window.removeEventListener('click', handleInteraction);
+        window.removeEventListener('touchstart', handleInteraction);
     };
   }, []);
 
