@@ -15,7 +15,7 @@ interface AudioControllerProps {
   onEngineChange: (engine: 'gemini' | 'browser') => void;
   selectedVoice: string;
   onVoiceChange: (voice: string) => void;
-  onRefreshVoices: () => void; // 必须确保这一行存在，否则构建会失败
+  onRefreshVoices: () => void; // 回调
   browserVoices: SpeechSynthesisVoice[];
   
   playbackRate: number;
@@ -84,6 +84,10 @@ const AudioController: React.FC<AudioControllerProps> = ({
 }) => {
   const isGenerating = status === AppStatus.GENERATING_AUDIO;
   const isBuffering = status === AppStatus.GENERATING_AUDIO;
+  
+  // 新增：刷新按钮的状态反馈
+  const [refreshState, setRefreshState] = useState<'idle' | 'loading' | 'done'>('idle');
+  const [voiceCountMsg, setVoiceCountMsg] = useState('');
 
   // --- Favorite Voices Logic ---
   const [favorites, setFavorites] = useState<Set<string>>(() => {
@@ -108,6 +112,18 @@ const AudioController: React.FC<AudioControllerProps> = ({
   };
 
   const isCurrentFavorite = favorites.has(selectedVoice);
+  
+  const handleRefreshClick = () => {
+      setRefreshState('loading');
+      onRefreshVoices();
+      
+      // 模拟一个加载过程以便给用户反馈
+      setTimeout(() => {
+          setRefreshState('done');
+          setVoiceCountMsg(`(${browserVoices.length})`);
+          setTimeout(() => setRefreshState('idle'), 2000);
+      }, 800);
+  };
 
   // Combine and Sort Voices
   const sortedVoices = useMemo(() => {
@@ -242,14 +258,25 @@ const AudioController: React.FC<AudioControllerProps> = ({
                     </span>
                     {ttsEngine === 'browser' && (
                         <button 
-                            onClick={onRefreshVoices}
-                            className="text-xs text-indigo-600 hover:text-indigo-800 flex items-center gap-0.5"
+                            onClick={handleRefreshClick}
+                            disabled={refreshState === 'loading'}
+                            className={`text-xs flex items-center gap-0.5 px-2 py-0.5 rounded transition-colors
+                                ${refreshState === 'done' ? 'text-emerald-600 bg-emerald-50' : 'text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50'}
+                            `}
                             title="刷新语音列表"
                         >
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
-                            </svg>
-                            刷新
+                            {refreshState === 'loading' ? (
+                                <span className="animate-spin h-3 w-3 border-b-2 border-indigo-600 rounded-full inline-block"></span>
+                            ) : refreshState === 'done' ? (
+                                <span>OK {voiceCountMsg}</span>
+                            ) : (
+                                <>
+                                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3">
+                                        <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                    </svg>
+                                    <span>刷新</span>
+                                </>
+                            )}
                         </button>
                     )}
                 </div>
