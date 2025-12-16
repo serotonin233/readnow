@@ -100,7 +100,7 @@ const AudioController: React.FC<AudioControllerProps> = ({
   });
 
   const toggleFavorite = (voiceId: string) => {
-    if (!voiceId) return;
+    if (!voiceId || voiceId === 'SYSTEM_DEFAULT') return;
     const newFavs = new Set(favorites);
     if (newFavs.has(voiceId)) {
       newFavs.delete(voiceId);
@@ -132,42 +132,41 @@ const AudioController: React.FC<AudioControllerProps> = ({
     if (ttsEngine === 'gemini') {
       list = GEMINI_VOICES.map(v => ({ id: v.id, name: v.name }));
     } else {
-      // 1. 获取当前浏览器返回的列表
+      // 1. 始终添加“系统默认”作为第一项
+      list.push({ id: 'SYSTEM_DEFAULT', name: '📱 系统默认 (跟随手机设置)' });
+
+      // 2. 获取当前浏览器返回的列表
       if (browserVoices.length > 0) {
-        list = browserVoices.map(v => ({ 
+        const mapped = browserVoices.map(v => ({ 
             id: v.name, 
             name: formatVoiceLabel(v)
         }));
-      } else {
-        list = [];
+        list = [...list, ...mapped];
       }
       
-      // 2. 检查：如果用户当前选中的声音 (selectedVoice) 还没加载出来，
-      // 我们必须把它手动加到列表里，否则 Select 组件会视觉上跳到第一个选项，给用户“声音丢失”的错觉。
+      // 3. 检查：如果用户当前选中的声音 (selectedVoice) 还没加载出来，
+      // 且不是系统默认，则手动加回列表，防止跳变
       const isSelectedInList = list.some(v => v.id === selectedVoice);
       const isGeminiVoice = GEMINI_VOICES.some(v => v.id === selectedVoice);
       
-      if (!isSelectedInList && !isGeminiVoice && selectedVoice) {
-          // 尝试临时添加一个占位符
-          list.unshift({
+      if (!isSelectedInList && !isGeminiVoice && selectedVoice && selectedVoice !== 'SYSTEM_DEFAULT') {
+          list.push({
               id: selectedVoice,
               name: `${selectedVoice} (加载中...)`
           });
       }
-
-      // 如果列表彻底为空，且也没有选中的，显示加载中
-      if (list.length === 0) {
-           list = [{ id: '', name: '正在加载本地语音... (请点击屏幕唤醒)' }];
-      }
     }
 
+    // 排序：系统默认置顶，收藏次之，其他默认
     return list.sort((a, b) => {
+      if (a.id === 'SYSTEM_DEFAULT') return -1;
+      if (b.id === 'SYSTEM_DEFAULT') return 1;
+
       const aFav = favorites.has(a.id);
       const bFav = favorites.has(b.id);
-      // Favorites first
       if (aFav && !bFav) return -1;
       if (!aFav && bFav) return 1;
-      return 0; // 保持原有顺序（已在 App.tsx 优化过）
+      return 0;
     });
   }, [ttsEngine, browserVoices, favorites, selectedVoice]);
 
@@ -316,7 +315,7 @@ const AudioController: React.FC<AudioControllerProps> = ({
                 
                 <button
                     onClick={() => toggleFavorite(selectedVoice)}
-                    disabled={!selectedVoice}
+                    disabled={!selectedVoice || selectedVoice === 'SYSTEM_DEFAULT'}
                     className={`p-2.5 rounded-lg border transition-all flex-shrink-0
                         ${isCurrentFavorite 
                             ? 'bg-amber-50 border-amber-200 text-amber-500 hover:bg-amber-100' 
@@ -339,10 +338,10 @@ const AudioController: React.FC<AudioControllerProps> = ({
              {/* iOS 增强语音教程 */}
             {ttsEngine === 'browser' && (
                 <div className="mt-2 p-3 bg-indigo-50 rounded-lg text-xs text-indigo-800 leading-relaxed border border-indigo-100">
-                   <p className="font-bold mb-1">📢 刚刚下载了新声音但找不到？</p>
-                   <p className="mb-1">1. 请前往 <span className="font-bold">设置 &gt; 辅助功能 &gt; 朗读内容 &gt; 声音</span> 下载 (推荐 LiLi 或 Yu-shu)。</p>
-                   <p className="mb-1">2. iOS 系统限制：新下载的语音不会立即生效。</p>
-                   <p className="text-red-600 font-semibold">✨ 请务必手动刷新整个网页，或重启浏览器。</p>
+                   <p className="font-bold mb-1">📢 如何使用 LiLi 等高级语音？</p>
+                   <p className="mb-1">1. 在 iPhone 设置 &gt; 辅助功能 &gt; 朗读内容 &gt; 声音 中选择并下载 LiLi。</p>
+                   <p className="mb-1">2. 确保在系统设置中 LiLi 是<span className="font-bold">被选中</span>的状态。</p>
+                   <p className="text-red-600 font-semibold">3. 在本工具上方选择【系统默认 (跟随手机设置)】。</p>
                 </div>
             )}
           </div>
