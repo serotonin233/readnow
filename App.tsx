@@ -58,6 +58,11 @@ const App: React.FC = () => {
   // --- Browser TTS Initialization (iOS Optimized) ---
   
   const refreshBrowserVoices = (): number => {
+      // 在 iOS 上，有时需要先 resume 才能获取 voices
+      if (window.speechSynthesis.paused) {
+          window.speechSynthesis.resume();
+      }
+
       const allVoices = window.speechSynthesis.getVoices();
       console.log(`[VoiceLoader] Found ${allVoices.length} raw voices.`);
       
@@ -95,10 +100,10 @@ const App: React.FC = () => {
 
       setBrowserVoices(sorted);
       
-      // 只有当列表不为空且当前没有选中有效语音时，才重置选择
+      // 【关键修复】不要轻易重置用户的选择
       if (sorted.length > 0) {
-          const currentExists = sorted.some(v => v.name === selectedVoice);
-          if (!currentExists || !selectedVoice || selectedVoice === 'Kore') {
+          const currentSelectionIsGemini = selectedVoice === 'Kore' || GEMINI_VOICES_ID.includes(selectedVoice);
+          if (!selectedVoice || currentSelectionIsGemini) {
               setSelectedVoice(sorted[0].name);
           }
       }
@@ -106,7 +111,13 @@ const App: React.FC = () => {
       return sorted.length;
   };
 
+  // 辅助：判断是否是 Gemini 的 ID
+  const GEMINI_VOICES_ID = ['Kore', 'Zephyr', 'Puck', 'Fenrir', 'Charon'];
+
   const wakeUpBrowserTTS = () => {
+      // 必须先 cancel，防止队列卡死
+      window.speechSynthesis.cancel();
+      
       // 创建一个极短的静音发声
       const u = new SpeechSynthesisUtterance(" ");
       u.volume = 0; 
@@ -119,13 +130,34 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
+    // 1. 初始化尝试加载
     refreshBrowserVoices();
     
+    // 2. 监听 voiceschanged (标准)
     if (window.speechSynthesis.onvoiceschanged !== undefined) {
       window.speechSynthesis.onvoiceschanged = () => refreshBrowserVoices();
     }
     
-    // 轮询几次以防加载延迟
+    // 3. 【关键修复】监听 VisibilityChange
+    const handleVisibilityChange = () => {
+        if (!document.hidden) {
+            console.log("[App] Page became visible, refreshing voices...");
+            // 延迟一点点执行，给浏览器内核喘息时间
+            setTimeout(() => {
+                wakeUpBrowserTTS();
+            }, 300);
+        }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // 4. 【关键修复】监听 Focus
+    const handleFocus = () => {
+         console.log("[App] Window focused, refreshing voices...");
+         refreshBrowserVoices();
+    };
+    window.addEventListener('focus', handleFocus);
+
+    // 5. 暴力轮询 (兜底)
     let retryCount = 0;
     const interval = setInterval(() => {
         const count = refreshBrowserVoices();
@@ -136,7 +168,11 @@ const App: React.FC = () => {
         retryCount++;
     }, 1000);
 
-    return () => clearInterval(interval);
+    return () => {
+        clearInterval(interval);
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+        window.removeEventListener('focus', handleFocus);
+    };
   }, []);
 
   // --- Audio Context Lifecycle ---
@@ -188,8 +224,9 @@ const App: React.FC = () => {
     console.log("[Audio] Attempting to ensure AudioContext is ready...");
     
     // 1. 如果不存在，立即创建
+    // 【关键修复】不传递 sampleRate 参数，让浏览器自动适配硬件采样率（iOS 上强制 24000 可能导致失败）
     if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     }
     
     const ctx = audioContextRef.current;
@@ -303,11 +340,17 @@ const App: React.FC = () => {
       if (engine === 'gemini') {
           setSelectedVoice('Kore');
       } else {
-          if (browserVoices.length > 0) {
-              const hasKore = browserVoices.find(v => v.name === 'Kore');
-              if (!hasKore) setSelectedVoice(browserVoices[0].name);
-          } else {
+          // 如果切换到本地语音时列表为空，尝试唤醒一次
+          if (browserVoices.length === 0) {
               wakeUpBrowserTTS();
+          }
+          
+          if (browserVoices.length > 0) {
+              // 优先保留当前选择（如果有效），否则选第一个
+              const currentExists = browserVoices.find(v => v.name === selectedVoice);
+              if (!currentExists) {
+                  setSelectedVoice(browserVoices[0].name);
+              }
           }
       }
       setStatus(AppStatus.IDLE);
@@ -337,11 +380,13 @@ const App: React.FC = () => {
       if (currentSessionId !== sessionIdRef.current) return;
 
       // 如果还没 Context，创建（主要用于非交互触发的预加载，尽管 handleStartProcess 会处理）
+      // 【关键修复】不带参数创建
       if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
       }
 
       const audioBytes = decodeBase64(base64Audio);
+      // 解码时，指定原始采样率为 24000 (Gemini输出)，AudioContext 会自动重采样以匹配硬件
       const audioBuffer = await decodeAudioData(audioBytes, audioContextRef.current, 24000);
 
       audioCacheRef.current.set(index, audioBuffer);
@@ -420,7 +465,7 @@ const App: React.FC = () => {
             setStatus(AppStatus.READY_TO_PLAY);
             playSequence(0, newChunks); 
         } else {
-            setErrorMsg("生成失败，请检查网络或切换到“本地语音”模式。");
+            setErrorMsg("生成失败，请检查网络配置(API Key)或切换到“本地语音”模式。");
             setStatus(AppStatus.IDLE);
         }
     } else {
